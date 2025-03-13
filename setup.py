@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="PyGTFSHandler",
+    name="UrbanAccessAnalyzer",
     version="0.1.0",
     description="A Python package to process isochrone service quality converage on open street network data.",
     long_description=open("README.md").read(),
