@@ -238,6 +238,7 @@ def gdf_from_file(file,layer:int|str=None,columns=None,bounds:gpd.GeoSeries=None
     return x    
 
 def raster_crop(input_path:str, bounds:gpd.GeoSeries):
+    import rasterio as rio
     from rasterio.windows import from_bounds#, bounds as window_bounds
     if len(bounds) > 1:
         bounds = gpd.GeoSeries(bounds.union_all(),crs=bounds.crs)
@@ -267,6 +268,7 @@ def raster_crop(input_path:str, bounds:gpd.GeoSeries):
     return cropped_data, meta
 
 def raster_to_gdf(raster, meta, bounds:gpd.GeoSeries=None):
+    import rasterio as rio
     from shapely.geometry import box
     from shapely import prepare, intersects
 
