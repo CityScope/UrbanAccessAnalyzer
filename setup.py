@@ -22,7 +22,8 @@ setup(
         "networkx>=3.0.0",
         "osmnx>=2.0.0",
         "osm2geojson>=0.1.0",
-        "pyarrow>=18.0.0"
+        "pyarrow>=18.0.0",
+        "rasterio>=1.0.0"
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
