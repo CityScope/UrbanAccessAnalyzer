@@ -94,7 +94,7 @@ def add_pop_density(pop_df:gpd.GeoDataFrame,buffer:float=0):
 
 
 def add_accessibility(pop_df,accessibility_graph,max_dist:float=500):
-    import osm
+    from . import osm
     import osmnx as ox
     import shapely
     new_pop_df = pop_df.copy()
