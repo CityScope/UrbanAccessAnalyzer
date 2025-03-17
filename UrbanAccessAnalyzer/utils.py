@@ -240,8 +240,7 @@ def gdf_from_file(file,layer:int|str=None,columns=None,bounds:gpd.GeoSeries=None
 def raster_crop(input_path:str, bounds:gpd.GeoSeries):
     from rasterio.windows import from_bounds#, bounds as window_bounds
     if len(bounds) > 1:
-        import geometry
-        bounds = geometry.merge_gdf(bounds)
+        bounds = gpd.GeoSeries(bounds.union_all(),crs=bounds.crs)
     # Open the GeoTIFF file
     try:
         src = rio.open(input_path,'r+')
