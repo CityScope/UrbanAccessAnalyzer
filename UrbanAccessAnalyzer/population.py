@@ -94,7 +94,7 @@ def add_pop_density(pop_df:gpd.GeoDataFrame,buffer:float=0):
 
 
 def add_accessibility(pop_df,accessibility_graph,max_dist:float=500):
-    from . import osm
+    from . import graph_processing
     import osmnx as ox
     import shapely
     new_pop_df = pop_df.copy()
@@ -110,7 +110,7 @@ def add_accessibility(pop_df,accessibility_graph,max_dist:float=500):
             new_pop_df.loc[inter,'accessibility'] = ls
 
     else:
-        pop_ids, edge_ids = osm.nearest_edges(pop_df.geometry.centroid,accessibility_graph,max_dist=max_dist)
+        pop_ids, edge_ids = graph_processing.nearest_edges(pop_df.geometry.centroid,accessibility_graph,max_dist=max_dist)
         edges = ox.graph_to_gdfs(accessibility_graph,nodes=False)
         edges = edges.loc[edge_ids] 
         edges['pop_ids'] = pop_ids
