@@ -196,3 +196,43 @@ def complex_split(geom, splitter,tolerance:float=1.0e-4):
     # The current one in shapely returns early when a point is found to be part of a segment.
     # But if the point was at a self-intersection it could be part of multiple segments.
     return split(snapped_geom, intersection_points)
+
+
+def gdf_from_file(file,layer:int|str=None,columns=None,bounds:gpd.GeoSeries=None,crs=None,reset_index:bool=True):
+    from pyogrio import read_info, read_dataframe
+
+
+    if not os.path.isfile(file):
+        raise Exception(f"file {file} not found")
+    
+    info = read_info(file)
+    file_crs = info['crs']
+    if type(file_crs) == None or len(file_crs) == 0:
+        file_crs = crs
+
+    if type(bounds) != type(None):
+        bounds = bounds.to_crs(file_crs).union_all()
+
+    x = read_dataframe(file,layer=layer,columns=columns,mask=bounds,use_arrow=True)
+
+    if ("GeoDataFrame" not in str(type(x))) and ("GeoSeries" not in str(type(x))):
+        if 'geometry' in x.keys():
+            from shapely import wkt
+            x['geometry'] = x['geometry'].apply(wkt.loads)
+            x = gpd.GeoDataFrame(x, crs=crs)
+        else:
+            warnings.warn("No geometry column found.")
+
+    if type(x.crs) == type(None):
+        x.crs = crs 
+    elif type(crs) != type(None):
+        x = x.to_crs(crs)
+
+    if type(x.crs) == type(None):
+        raise Exception("crs not defined")
+    
+    x = x[x.is_valid]
+    if reset_index:
+        x = x.reset_index(drop=True) 
+    
+    return x    
