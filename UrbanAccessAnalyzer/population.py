@@ -10,8 +10,8 @@ def read_estat(path,bounds):
     return pop_df.to_crs(bounds.crs)
 
 def read_ine(data,geo,bounds=None):
-    import geometry
-    ine_geo = geometry.gdf_from_file(geo,bounds=bounds)
+    from . import utils
+    ine_geo = utils.gdf_from_file(geo,bounds=bounds)
     ine_data = pd.read_csv(data,sep=";",dtype={"Total":int},thousands=r'.')
     ine_data = ine_data.dropna().reset_index(drop=True)
     ine_data["CUSEC"] = [i[0:10] for i in ine_data["Secciones"]]
@@ -57,7 +57,7 @@ def mix_ine_and_estat(ine,estat):
     return res
 
 def add_pop_density(pop_df:gpd.GeoDataFrame,buffer:float=0):
-    import geometry 
+    from . import utils
     import numpy as np
     crs = pop_df.crs
 
@@ -75,7 +75,7 @@ def add_pop_density(pop_df:gpd.GeoDataFrame,buffer:float=0):
         center = new_pop_df.geometry.centroid
         center = center.buffer(buffer,resolution=4)
 
-        inter = geometry.intersection_all_with_all(center.geometry,pop_df_simple.geometry)
+        inter = utils.intersection_all_with_all(center.geometry,pop_df_simple.geometry)
         inter = np.vectorize(lambda p: p.area)(inter)#getattr(p, 'area', 0))(inter)
         inter = np.divide(
             inter, 
