@@ -19,7 +19,8 @@ setup(
         "scipy>=1.0.0",
         "pyogrio>=0.1.0",
         "scikit-learn>=1.0.0",
-        "networkx>=3.0.0"
+        "networkx>=3.0.0",
+        "osmnx>=2.0.0"
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
