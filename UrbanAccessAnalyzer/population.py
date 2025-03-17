@@ -2,10 +2,10 @@ import geopandas as gpd
 import pandas as pd
 
 def read_estat(path,bounds):
-    import raster
+    from . import utils
     # Loading the population grid from eurostat
-    rio, meta = raster.crop(path,bounds)
-    pop_df = raster.to_gdf(rio,meta,bounds)
+    rio, meta = utils.raster_crop(path,bounds)
+    pop_df = utils.raster_to_gdf(rio,meta,bounds)
     pop_df["population"] = pop_df["value"].astype(int)
     return pop_df.to_crs(bounds.crs)
 
