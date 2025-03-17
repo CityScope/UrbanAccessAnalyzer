@@ -716,10 +716,13 @@ def isochrone_exact_boundary_gdfs(nodes:gpd.GeoDataFrame,edges:gpd.GeoDataFrame,
     nodes_border = nodes.loc[nodes.index.isin(
             list(edges_border.reset_index()['u']) + list(edges_border.reset_index()['v'])
         )]
+
     edges_border = pd.concat([
             edges_border,
             edges.loc[list(edges.reset_index()['u'].isin(edges_border.reset_index()['v']) & edges.reset_index()['v'].isin(edges_border.reset_index()['u']))] 
-            ]).drop_duplicates()
+            ])
+
+    edges_border = edges_border[~edges_border.index.duplicated(keep='first')]
 
     new_nodes_border, new_edges_border, _ = add_points_to_graph_gdfs(border_points,nodes_border,edges_border,
                                                         min_node_id=min(nodes.index),max_dist=0.1,min_dist=min_dist,tolerance=0.1)
@@ -759,11 +762,14 @@ def isochrone_exact_boundary_gdfs(nodes:gpd.GeoDataFrame,edges:gpd.GeoDataFrame,
         iso_edges = pd.concat([
             iso_edges,
             edges.loc[edges.index.isin(edges_border.index)] 
-            ]).drop_duplicates()
+            ])
+
+        iso_edges = iso_edges[~iso_edges.index.duplicated(keep='first')]
     else:
         iso_edges = edges.loc[edges.index.isin(edges_border.index)]
 
-    iso_nodes = nodes.loc[nodes.index.isin(iso_edges.reset_index()['u']) | nodes.index.isin(iso_edges.reset_index()['v'])].drop_duplicates()
+    iso_nodes = nodes.loc[nodes.index.isin(iso_edges.reset_index()['u']) | nodes.index.isin(iso_edges.reset_index()['v'])]
+    iso_nodes = iso_nodes[~iso_nodes.index.duplicated(keep='first')]
     
     nodes = nodes.drop(columns=['total_border_len','border_dist','border_dist_u','border_dist_v','edge_id'],errors='ignore')
     edges = edges.drop(columns=['total_border_len','border_dist','border_dist_u','border_dist_v','edge_id'],errors='ignore')
@@ -870,11 +876,15 @@ def isochrone_exact_boundary_gdfs_border(nodes:gpd.GeoDataFrame,edges:gpd.GeoDat
         iso_edges = pd.concat([
             iso_edges,
             edges.loc[edges.index.isin(edges_border.index)] 
-            ]).drop_duplicates()
+            ])
+
+        iso_edges = iso_edges[~iso_nodes.index.duplicated(keep='first')]
     else:
         iso_edges = edges.loc[edges.index.isin(edges_border.index)]
 
-    iso_nodes = nodes.loc[nodes.index.isin(iso_edges.reset_index()['u']) | nodes.index.isin(iso_edges.reset_index()['v'])].drop_duplicates()
+    iso_nodes = nodes.loc[nodes.index.isin(iso_edges.reset_index()['u']) | nodes.index.isin(iso_edges.reset_index()['v'])]
+
+    iso_nodes = iso_nodes[~iso_nodes.index.duplicated(keep='first')]
 
     nodes = nodes.drop(columns=['total_border_len','border_dist','border_dist_u','border_dist_v','edge_id'],errors='ignore')
     edges = edges.drop(columns=['total_border_len','border_dist','border_dist_u','border_dist_v','edge_id'],errors='ignore')
