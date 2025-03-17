@@ -237,6 +237,52 @@ def gdf_from_file(file,layer:int|str=None,columns=None,bounds:gpd.GeoSeries=None
     
     return x    
 
+
+def validate_crs(src):
+    import rasterio as rio
+    import re
+    if type(src) is dict:
+        crs = src['crs']
+    elif type(src) is CRS:
+        crs = src
+    elif type(src) is rio.io.DatasetReader:
+        crs = src.crs
+    elif type(src) is str:
+        crs = CRS.from_string(src)
+    elif type(src) is int:
+        crs = CRS.from_epsg(src)
+    else:
+        raise Exception(f"src type {type(src)} not accepted: {src}")
+
+    warnings.filterwarnings(
+        "ignore",
+        message=re.escape(
+            "You will likely lose important projection information when converting to a PROJ string from another format. See: https://proj.org/faq.html#what-is-the-best-format-for-describing-coordinate-reference-systems"
+        ),
+        category=UserWarning
+    )
+    if len(crs.to_proj4()) == 0:
+        crs_str = crs.to_wkt()
+        
+        if "LOCAL_CS" in crs_str:
+            if "ETRS89-extended / LAEA Europe" in crs_str:
+                crs = CRS.from_epsg(3035)
+
+                if (type(src) == rio.io.DatasetReader) and (src.mode != 'r'):
+                    src.crs = crs
+
+                return crs
+            # Add more mappings as needed
+            # elif "Another projection" in crs_str:
+            #     return CRS.from_epsg(some_epsg_code)
+            else:
+                raise ValueError("Unknown LOCAL_CS definition; manual intervention needed.")
+        else:
+            raise ValueError("CRS is invalid, but not due to LOCAL_CS.")
+    else:
+        return crs.to_epsg() # to_proj4()
+
+
 def raster_crop(input_path:str, bounds:gpd.GeoSeries):
     import rasterio as rio
     from rasterio.windows import from_bounds#, bounds as window_bounds
