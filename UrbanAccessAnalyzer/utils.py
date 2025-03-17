@@ -236,3 +236,74 @@ def gdf_from_file(file,layer:int|str=None,columns=None,bounds:gpd.GeoSeries=None
         x = x.reset_index(drop=True) 
     
     return x    
+
+def raster_crop(input_path:str, bounds:gpd.GeoSeries):
+    from rasterio.windows import from_bounds#, bounds as window_bounds
+    if len(bounds) > 1:
+        import geometry
+        bounds = geometry.merge_gdf(bounds)
+    # Open the GeoTIFF file
+    try:
+        src = rio.open(input_path,'r+')
+    except:
+        src = rio.open(input_path,'r')
+
+    crs = validate_crs(src)
+    # Check and reproject the bounding box coordinates if needed
+    if bounds.crs != crs:
+        bounds = bounds.to_crs(crs)
+
+    # Get the window coordinates based on the bounding box
+    window = from_bounds(*bounds.total_bounds, transform=src.transform)
+
+    # Read the data from the specified window
+    cropped_data = src.read(window=window)
+
+    # Update the metadata for the cropped GeoTIFF
+    meta = src.meta
+    meta['width'], meta['height'] = window.width, window.height
+    meta['transform'] = src.window_transform(window)
+    meta['crs'] = crs
+    src.close()
+    return cropped_data, meta
+
+def raster_to_gdf(raster, meta, bounds:gpd.GeoSeries=None):
+    from shapely.geometry import box
+    from shapely import prepare, intersects
+
+    # Extract metadata
+    transform = meta['transform']
+    height, width = raster.shape[1:]
+
+    # Initialize lists to store geometries and pixel values
+    geometries = []
+    values = []
+
+    # Iterate over each pixel in the window
+    for i in range(height):
+        for j in range(width):
+            # Get pixel value
+            value = raster[0, i, j]  # Accessing the first band assuming single-band raster
+
+            # Calculate pixel coordinates in CRS
+            lon, lat = rio.transform.xy(transform, i, j)
+
+            # Create bounding box geometry for the pixel
+            minx, miny = rio.transform.xy(transform, i - 0.5, j - 0.5)
+            maxx, maxy = rio.transform.xy(transform, i + 0.5, j + 0.5)
+            pixel_box = box(minx, miny, maxx, maxy)
+
+            geometries.append(pixel_box)
+            values.append(value)
+
+    # Create a GeoDataFrame
+    df = gpd.GeoDataFrame({'value': values, 'geometry': geometries}, crs=validate_crs(meta['crs']))
+
+    if bounds is not None:
+        bounds = bounds.to_crs(df.crs)
+        geoms = list(df.geometry.centroid)
+        prepare(geoms)
+        df = df.loc[intersects(geoms,bounds.geometry.union_all())].reset_index(drop=True)
+
+
+    return df
