@@ -3,6 +3,7 @@ import geopandas as gpd
 import os
 import warnings
 import numpy as np
+from pyproj import CRS
 
 gpd.options.io_engine = "pyogrio"
 PYOGRIO_USE_ARROW=1
