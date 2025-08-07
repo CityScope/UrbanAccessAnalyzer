@@ -1,617 +1,941 @@
+import pandas as pd
 import geopandas as gpd
+import polars as pl
 import osmnx as ox
-import polars as pl 
-import pandas as pd 
-import numpy as np
 import networkx as nx
+from shapely.geometry import Point
+import numpy as np
+from sklearn.cluster import AgglomerativeClustering
+
 import warnings
 
-def nodes_to_points(nodes,G): 
-    from shapely.geometry import Point
+"TODO: Compute length in polars"
+"TODO: node elevations does not work"
+
+NODE_COLS = ["highway"]
+EDGE_COLS = [
+    "osmid",
+    "highway",
+    "oneway",
+    "reversed",
+    "name",
+    "maxspeed",
+    "bridge",
+    "lanes",
+    "ref",
+    "junction",
+    "access",
+    "width",
+    "service",
+    "tunnel",
+    "area",
+]
+
+
+def add_node_elevations_open_api(G):
+    orig_template = ox.settings.elevation_url_template
+    ox.settings.elevation_url_template = (
+        "https://api.open-elevation.com/api/v1/lookup?locations={locations}"
+    )
+    crs = G.graph["crs"]
+    G = ox.projection.project_graph(G, to_latlong=True)
+    G = ox.add_node_elevations_google(G, batch_size=250)
+    ox.settings.elevation_url_template = orig_template
+    G = ox.projection.project_graph(G, to_crs=crs)
+    return G
+
+
+def graph_to_polars(G):
+    nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
+    nodes_gdf[NODE_COLS] = nodes_gdf[NODE_COLS].astype(str)
+    edges_gdf[EDGE_COLS] = edges_gdf[EDGE_COLS].astype(str)
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=UserWarning,
+            message="Geometry column does not contain geometry.",
+        )
+
+        edges = edges_gdf.reset_index()[
+            ["u", "v", "key"] + EDGE_COLS + ["length", "geometry"]
+        ]
+        edges["geometry"] = edges["geometry"].to_wkt()
+        edges["geometry"] = edges["geometry"].astype(str)
+        edges_pl = pl.from_pandas(edges)
+
+        nodes = nodes_gdf.reset_index()[["osmid", "x", "y"] + NODE_COLS + ["geometry"]]
+        nodes["geometry"] = nodes["geometry"].to_wkt()
+        nodes["geometry"] = nodes["geometry"].astype(str)
+        nodes_pl = pl.from_pandas(nodes)
+    return nodes_pl, edges_pl, nodes_gdf.crs, G.graph
+
+
+def polars_to_graph(nodes_pl, edges_pl, crs, graph_attrs, compute_length: bool = False):
+    if compute_length:
+        edges_gdf = edges_pl.to_pandas()[["u", "v", "key"] + EDGE_COLS + ["geometry"]]
+    else:
+        edges_gdf = edges_pl.to_pandas()[
+            ["u", "v", "key"] + EDGE_COLS + ["length", "geometry"]
+        ]
+
+    edges_gdf["u"] = edges_gdf["u"].astype(int)
+    edges_gdf["v"] = edges_gdf["v"].astype(int)
+    edges_gdf["key"] = edges_gdf["key"].astype(int)
+    edges_gdf = edges_gdf.set_index(["u", "v", "key"])
+    edges_gdf = gpd.GeoDataFrame(
+        edges_gdf, geometry=gpd.GeoSeries.from_wkt(edges_gdf["geometry"]), crs=crs
+    )
+    if compute_length:
+        edges_gdf["length"] = edges_gdf.geometry.length
+
+    nodes_gdf = nodes_pl.to_pandas()[["osmid", "x", "y"] + NODE_COLS + ["geometry"]]
+    nodes_gdf["osmid"] = nodes_gdf["osmid"].astype(int)
+    nodes_gdf = gpd.GeoDataFrame(
+        nodes_gdf, geometry=gpd.points_from_xy(nodes_gdf["x"], nodes_gdf["y"]), crs=crs
+    )
+    nodes_gdf = nodes_gdf.set_index("osmid")
+
+    G = ox.graph_from_gdfs(
+        gdf_nodes=nodes_gdf, gdf_edges=edges_gdf, graph_attrs=graph_attrs
+    )
+
+    return G
+
+
+def __connected_node_groups(nodes_pl, edges_pl, max_dist: float | None = None):
+    edges_pl = edges_pl.with_columns(
+        pl.concat_list(pl.col("u"), pl.col("v")).sort().alias("node_list")
+    )
+
+    edges_pl = (
+        pl.concat(
+            [edges_pl, edges_pl.rename({"u": "v", "v": "u"}).select(edges_pl.columns)]
+        )
+        .unique(["u", "v"])
+        .lazy()
+    )
+
+    edges_pl = (
+        edges_pl.group_by("u")
+        .agg(pl.col("v").alias("node_list"), pl.col("v"))
+        .explode("v")
+        .group_by("v")
+        .agg(pl.col("node_list").flatten(), pl.col("u"))
+        .with_columns(
+            pl.col("node_list")
+            .list.concat(pl.col("u"))
+            .list.sort()
+            .list.unique()
+            .alias("node_list")
+        )
+        .with_columns(pl.col("node_list").alias("osmid"))
+        .explode("osmid")
+    )
+
+    prev_count = None
+
+    while True:
+        # Collapse node lists by osmid
+        edges_pl = (
+            edges_pl.group_by("osmid")
+            .agg(pl.col("node_list").flatten().sort().unique())
+            .with_columns(
+                [
+                    pl.col("node_list").alias(
+                        "osmid"
+                    )  # Use merged node list to redefine osmid
+                ]
+            )
+            .explode("osmid")
+            .unique()
+        )
+
+        current_count = edges_pl.select(pl.col("osmid").n_unique()).collect()[0, 0]
+
+        if prev_count == current_count:
+            break
+        prev_count = current_count
+
+    edges_pl = edges_pl.collect()
+
+    if max_dist is None:
+        edges_pl = (
+            edges_pl.group_by("osmid")
+            .agg(pl.col("node_list").flatten().min().alias("osmid_group"))
+            .join(nodes_pl.select("osmid", "x", "y"), on="osmid", how="left")
+            .group_by("osmid_group")
+            .agg(
+                pl.col("x").mean(),
+                pl.col("y").mean(),
+                pl.col("osmid"),
+                pl.col("osmid").min().alias("new_osmid"),
+            )
+            .explode("osmid")
+        )
+    else:
+
+        def cluster(x, y, max_dist):
+            coords = np.column_stack((x, y))
+            return list(
+                AgglomerativeClustering(
+                    n_clusters=None,
+                    distance_threshold=max_dist,
+                    metric="euclidean",
+                    linkage="complete",
+                )
+                .fit(coords)
+                .labels_
+            )
+
+        edges_pl = (
+            edges_pl.group_by("osmid")
+            .agg(pl.col("node_list").flatten().min().alias("osmid_group"))
+            .join(nodes_pl.select("osmid", "x", "y"), on="osmid", how="left")
+            .group_by("osmid_group")
+            .agg(pl.col("x"), pl.col("y"), pl.col("osmid"))
+            .with_columns(
+                (
+                    pl.when(pl.col("x").len() > 2)
+                    .then(
+                        pl.struct(["x", "y"]).map_elements(
+                            lambda row: cluster(row["x"], row["y"], max_dist),
+                            return_dtype=list[int],
+                        )
+                    )
+                    .otherwise([0, 0])
+                ).alias("cluster_id")
+            )
+            .explode(["osmid", "x", "y", "cluster_id"])
+            .group_by("osmid_group", "cluster_id")
+            .agg(
+                pl.col("x").mean(),
+                pl.col("y").mean(),
+                pl.col("osmid"),
+                pl.col("osmid").min().alias("new_osmid"),
+            )
+            .drop("cluster_id")
+            .explode("osmid")
+        )
+
+    return edges_pl
+
+
+def __remove_small_edges(nodes_pl, edges_pl, min_edge_length, crs):
+    delete_edges = edges_pl.filter(
+        (pl.col("length") <= min_edge_length) & (pl.col("u") != pl.col("v"))
+    )
+
+    delete_edges = __connected_node_groups(
+        nodes_pl, delete_edges, max_dist=min_edge_length * 1.5
+    )
+
+    edges_pl = (
+        edges_pl.join(
+            delete_edges.rename(
+                {
+                    "osmid": "u",
+                    "new_osmid": "new_u",
+                    "x": "new_u_x",
+                    "y": "new_u_y",
+                    "osmid_group": "osmid_group_u",
+                }
+            ),
+            on="u",
+            how="left",
+        )
+        .join(
+            delete_edges.rename(
+                {
+                    "osmid": "v",
+                    "new_osmid": "new_v",
+                    "x": "new_v_x",
+                    "y": "new_v_y",
+                    "osmid_group": "osmid_group_v",
+                }
+            ),
+            on="v",
+            how="left",
+        )
+        .filter(
+            pl.col("new_u").is_null()
+            | pl.col("new_v").is_null()
+            | (pl.col("new_u") != pl.col("new_v"))
+            | ((pl.col("new_u") == pl.col("new_v")) & (pl.col("u") == pl.col("v")))
+        )
+        .with_columns(
+            pl.when(pl.col("new_u_x").is_not_null())
+            .then(
+                # Build new LINESTRING with replacement first point
+                "LINESTRING ("
+                + pl.col("new_u_x").cast(pl.Utf8)
+                + " "
+                + pl.col("new_u_y").cast(pl.Utf8)
+                + ", "
+                + pl.col("geometry").str.extract(r"^LINESTRING\s*\([^,]+,\s*(.*)\)$", 1)
+                + ")"
+            )
+            .otherwise(pl.col("geometry"))
+            .alias("geometry"),
+            (
+                pl.when(pl.col("new_u").is_not_null())
+                .then(pl.col("new_u"))
+                .otherwise(pl.col("u"))
+            ).alias("u"),
+            (
+                pl.when(pl.col("new_u").is_not_null())
+                .then(pl.lit(True))
+                .otherwise(pl.lit(False))
+            ).alias("changed_u"),
+        )
+        .with_columns(
+            (
+                pl.when(pl.col("new_v_x").is_not_null())
+                .then(
+                    # Extract part before the last point
+                    pl.col("geometry").str.extract(
+                        r"^(LINESTRING\s*\(.*),\s*[^, )]+ [^, )]+\)$", 1
+                    )
+                    + ", "
+                    + pl.col("new_v_x").cast(pl.Utf8)
+                    + " "
+                    + pl.col("new_v_y").cast(pl.Utf8)
+                    + ")"
+                )
+                .otherwise(pl.col("geometry"))
+            ).alias("geometry"),
+            (
+                pl.when(pl.col("new_v").is_not_null())
+                .then(pl.col("new_v"))
+                .otherwise(pl.col("v"))
+            ).alias("v"),
+            (
+                pl.when(pl.col("new_v").is_not_null())
+                .then(pl.lit(True))
+                .otherwise(pl.lit(False))
+            ).alias("changed_v"),
+        )
+        .with_columns((pl.col("u").cum_count().over(["u", "v"]) - 1).alias("key"))
+        .drop("new_u_x", "new_u_y", "new_u", "new_v_x", "new_v_y", "new_v")
+    )
+
+    nodes_pl = (
+        nodes_pl.join(
+            delete_edges.rename({"x": "new_x", "y": "new_y"}), on="osmid", how="left"
+        )
+        .with_columns(
+            (
+                pl.when(pl.col("new_osmid").is_not_null())
+                .then(pl.col("new_x"))
+                .otherwise(pl.col("x"))
+            ).alias("x"),
+            (
+                pl.when(pl.col("new_osmid").is_not_null())
+                .then(pl.lit(True))
+                .otherwise(pl.lit(False))
+            ).alias("grouped_node"),
+            (
+                pl.when(pl.col("new_osmid").is_not_null())
+                .then(pl.col("new_y"))
+                .otherwise(pl.col("y"))
+            ).alias("y"),
+            (
+                pl.when(pl.col("new_osmid").is_not_null())
+                .then(pl.col("new_osmid"))
+                .otherwise(pl.col("osmid"))
+            ).alias("osmid"),
+        )
+        .unique("osmid")
+        .drop("new_x", "new_y", "new_osmid")
+    )
+
+    edges_gdf = edges_pl.to_pandas()
+    edges_gdf["u"] = edges_gdf["u"].astype(int)
+    edges_gdf["v"] = edges_gdf["v"].astype(int)
+    edges_gdf["key"] = edges_gdf["key"].astype(int)
+    edges_gdf = gpd.GeoDataFrame(
+        edges_gdf, geometry=gpd.GeoSeries.from_wkt(edges_gdf["geometry"]), crs=crs
+    )
+    edges_gdf["length"] = edges_gdf.geometry.length
+
+    df_with_group = edges_gdf[
+        edges_gdf["osmid_group_u"].notna()
+        & edges_gdf["osmid_group_v"].notna()
+        & (edges_gdf["osmid_group_u"] == edges_gdf["osmid_group_v"])
+    ]
+    df_without_group = edges_gdf[
+        edges_gdf["osmid_group_u"].isna()
+        | edges_gdf["osmid_group_v"].isna()
+        | (edges_gdf["osmid_group_u"] != edges_gdf["osmid_group_v"])
+    ]
+
+    # Keep the one with the smallest 'length' for each (u, v)
+    df_with_group = df_with_group.sort_values("length").drop_duplicates(
+        subset=["u", "v"], keep="first"
+    )
+    df_with_group["key"] = 0
+    edges_gdf = pd.concat([df_with_group, df_without_group], ignore_index=True)
+
+    edges_gdf = edges_gdf[["u", "v", "key"] + EDGE_COLS + ["length", "geometry"]]
+    edges_gdf = edges_gdf.set_index(["u", "v", "key"])
+
+    nodes_gdf = nodes_pl.to_pandas()[["osmid", "x", "y"] + NODE_COLS + ["geometry"]]
+    nodes_gdf["osmid"] = nodes_gdf["osmid"].astype(int)
+    nodes_gdf = gpd.GeoDataFrame(
+        nodes_gdf, geometry=gpd.points_from_xy(nodes_gdf["x"], nodes_gdf["y"]), crs=crs
+    )
+    nodes_gdf = nodes_gdf.set_index("osmid")
+
+    return nodes_gdf, edges_gdf
+
+
+def __remove_near_edges(edges_gdf, max_dist):
+    def cluster(x, y, max_dist):
+        coords = np.column_stack((x, y))
+        return list(
+            AgglomerativeClustering(
+                n_clusters=None,
+                distance_threshold=max_dist,
+                metric="euclidean",
+                linkage="complete",
+            )
+            .fit(coords)
+            .labels_
+        )
+
+    edges_gdf["center"] = edges_gdf.geometry.interpolate(edges_gdf["length"] / 2)
+    edges_gdf["center_x"] = edges_gdf["center"].x
+    edges_gdf["center_y"] = edges_gdf["center"].y
+    edges_gdf = edges_gdf.reset_index()
+    edges_groups = (
+        edges_gdf.groupby(["u", "v"])
+        .agg(
+            key=("key", list),
+            center_x=("center_x", list),
+            center_y=("center_y", list),
+            n_keys=("key", "count"),
+        )
+        .reset_index()
+    )
+    edges_gdf = edges_gdf.drop(columns=["center", "center_x", "center_y"])
+
+    edges_groups["cluster_id"] = [[0]] * len(edges_groups)
+
+    mask = edges_groups["n_keys"] == 2
+    edges_groups.loc[mask, "cluster_id"] = edges_groups[mask].apply(
+        lambda row: [0, 0]
+        if (
+            (
+                (row["center_x"][0] - row["center_x"][1]) ** 2
+                + (row["center_y"][0] - row["center_y"][1]) ** 2
+            )
+            < (max_dist**2)
+        )
+        else [0, 1],
+        axis=1,
+    )
+
+    mask = edges_groups["n_keys"] > 2
+    edges_groups.loc[mask, "cluster_id"] = edges_groups[mask].apply(
+        lambda row: cluster(row["center_x"], row["center_y"], max_dist=max_dist), axis=1
+    )
+    edges_groups = edges_groups.drop(columns=["center_x", "center_y"]).explode(
+        ["key", "cluster_id"]
+    )
+
+    edges_gdf = edges_gdf.merge(
+        edges_groups[["u", "v", "key", "cluster_id"]], on=["u", "v", "key"], how="left"
+    )
+    edges_gdf = edges_gdf.sort_values(
+        ["u", "v", "cluster_id", "length"]
+    ).drop_duplicates(["u", "v", "cluster_id"], keep="first")
+    edges_gdf = edges_gdf.drop(columns="key").rename(columns={"cluster_id": "key"})
+    edges_gdf["key"] = edges_gdf["key"].astype(int)
+    edges_gdf = edges_gdf.set_index(["u", "v", "key"])
+    return edges_gdf
+
+
+def simplify_graph(
+    G,
+    min_edge_length=0,
+    min_edge_separation=0,
+    loops: bool = True,
+    multi: bool = True,
+    undirected: bool = False,
+):
+    nodes_pl, edges_pl, crs, graph_attrs = graph_to_polars(G)
+    if not loops:
+        edges_pl = edges_pl.filter(pl.col("u") != pl.col("v"))
+
+    if not multi:
+        if undirected:
+            edges_pl = (
+                edges_pl.with_columns(
+                    pl.concat_list([pl.col("u"), pl.col("v")])
+                    .list.sort()
+                    .alias("sorted_nodes")
+                )
+                .sort(by=["sorted_nodes", "length"])
+                .unique(subset=["sorted_nodes"], keep="first")
+                .with_columns(pl.lit(0).alias("key"))
+                .drop("sorted_nodes")
+            )
+        else:
+            edges_pl = (
+                edges_pl.sort(by=["u", "v", "length"])
+                .unique(subset=["u", "v"], keep="first")
+                .with_columns(pl.lit(0).alias("key"))
+            )
+
+    elif undirected:
+        edges_pl = (
+            edges_pl.with_columns(
+                pl.concat_list([pl.col("u"), pl.col("v")])
+                .list.sort()
+                .alias("sorted_nodes")
+            )
+            .unique(subset=["sorted_nodes", "length", "maxspeed"])
+            .with_columns(
+                pl.col("sorted_nodes").list.get(0).alias("new_u"),
+                pl.col("sorted_nodes").list.get(1).alias("new_v"),
+                (pl.col("sorted_nodes").cum_count().over(["sorted_nodes"]) - 1).alias(
+                    "key"
+                ),
+            )
+            .drop("sorted_nodes")
+            .with_columns(
+                (
+                    pl.when(pl.col("u") == pl.col("new_u"))
+                    .then(pl.col("geometry"))
+                    .otherwise(
+                        pl.lit("LINESTRING (")
+                        + pl.col("geometry")
+                        .str.replace("LINESTRING \\(", "")
+                        .str.replace("\\)$", "")
+                        .str.split(", ")
+                        .list.eval(pl.element().str.strip_chars())
+                        .list.reverse()
+                        .list.join(", ")
+                        + pl.lit(")")
+                    )
+                ).alias("geometry"),
+                pl.col("new_u").alias("u"),
+                pl.col("new_v").alias("v"),
+            )
+            .drop(["new_u", "new_v"])
+        )
+
+    if min_edge_length > 0:
+        nodes_gdf, edges_gdf = __remove_small_edges(
+            nodes_pl, edges_pl, min_edge_length=min_edge_length, crs=crs
+        )
+        G = ox.graph_from_gdfs(
+            gdf_nodes=nodes_gdf, gdf_edges=edges_gdf, graph_attrs=graph_attrs
+        )
+        G = simplify_graph(
+            G,
+            min_edge_length=0,
+            min_edge_separation=min_edge_separation,
+            loops=loops,
+            multi=multi,
+            undirected=undirected,
+        )
+    else:
+        if multi and (min_edge_separation > 0):
+            edges_gdf = edges_pl.to_pandas()
+            edges_gdf["u"] = edges_gdf["u"].astype(int)
+            edges_gdf["v"] = edges_gdf["v"].astype(int)
+            edges_gdf["key"] = edges_gdf["key"].astype(int)
+            edges_gdf = gpd.GeoDataFrame(
+                edges_gdf,
+                geometry=gpd.GeoSeries.from_wkt(edges_gdf["geometry"]),
+                crs=crs,
+            )
+            edges_gdf = edges_gdf[
+                ["u", "v", "key"] + EDGE_COLS + ["length", "geometry"]
+            ]
+            edges_gdf = edges_gdf.set_index(["u", "v", "key"])
+
+            nodes_gdf = nodes_pl.to_pandas()[
+                ["osmid", "x", "y"] + NODE_COLS + ["geometry"]
+            ]
+            nodes_gdf["osmid"] = nodes_gdf["osmid"].astype(int)
+            nodes_gdf = gpd.GeoDataFrame(
+                nodes_gdf,
+                geometry=gpd.points_from_xy(nodes_gdf["x"], nodes_gdf["y"]),
+                crs=crs,
+            )
+            nodes_gdf = nodes_gdf.set_index("osmid")
+
+            edges_gdf = __remove_near_edges(edges_gdf, max_dist=min_edge_separation)
+
+            G = ox.graph_from_gdfs(
+                gdf_nodes=nodes_gdf, gdf_edges=edges_gdf, graph_attrs=graph_attrs
+            )
+        else:
+            G = polars_to_graph(nodes_pl, edges_pl, crs, graph_attrs)
+
+    return G
+
+
+def nodes_to_points(nodes, G):
     # Get point geometries for the given nodes
-    point_geometries = [(node, Point((G.nodes[node]['x'], G.nodes[node]['y']))) for node in nodes if node in G.nodes]
+    point_geometries = [
+        (node, Point((G.nodes[node]["x"], G.nodes[node]["y"])))
+        for node in nodes
+        if node in G.nodes
+    ]
     # Create a GeoDataFrame
-    gdf = gpd.GeoDataFrame(point_geometries, columns=['osmid', 'geometry'])
+    gdf = gpd.GeoDataFrame(point_geometries, columns=["osmid", "geometry"])
     # Get the CRS from the graph
-    crs = G.graph['crs']
+    crs = G.graph["crs"]
     # Set the coordinate reference system (CRS) from the graph
     gdf.set_crs(crs, inplace=True)
     return gdf
 
-def nearest_edges(geometries:gpd.GeoDataFrame|gpd.GeoSeries,G,max_dist:float=None):
-    edges = ox.graph_to_gdfs(G,nodes=False)
-    geom = geometries.geometry.to_crs(edges.crs)
-    indices = edges.sindex.nearest(geom,max_distance=max_dist)
-    # Create a DataFrame to store nearest node results
-    indices = pd.DataFrame({
-        'geom_idx': list(geometries.iloc[indices[0]].index),  # Indices of the geometries
-        'edge_idx': list(edges.iloc[indices[1]].index)   # Corresponding indices of nearest nodes
-    })
-    
-    # Drop duplicates to ensure a 1-to-1 mapping between geometries and nodes
-    indices = indices.drop_duplicates('geom_idx').reset_index(drop=True)
 
-    # Return lists of corresponding indices of geometries and nodes
-    return list(indices['geom_idx']), list(indices['edge_idx'])
-    #return list(geometries.iloc[indices[0,:]].index), list(edges.iloc[indices[1,:]].index)
-
-#def nearest_nodes(geometries:gpd.GeoDataFrame|gpd.GeoSeries,G,max_dist:float=None):
-#    nodes = ox.graph_to_gdfs(G,edges=False)
-#    geom = geometries.geometry.to_crs(nodes.crs)
-#    indices = nodes.sindex.nearest(geom,max_distance=max_dist)
-#    indices = pd.DataFrame({'geom':list(indices[0,:]),'nodes':list(indices[1,:])})
-#    indices = indices.drop_duplicates('geom').reset_index(drop=True)
-#    return list(geometries.iloc[list(indices['geom'])].index), list(nodes.iloc[list(indices['nodes'])].index)
-
-def nearest_nodes(geometries: gpd.GeoDataFrame | gpd.GeoSeries, G, max_dist: float = None):
+def nearest_nodes(
+    geometries: gpd.GeoDataFrame | gpd.GeoSeries, G, max_dist: float | None = None
+):
     nodes = ox.graph_to_gdfs(G, edges=False)
-    geom = geometries.geometry.to_crs(nodes.crs)
+    geom = geometries.to_crs(nodes.crs).copy()
 
     # Find nearest nodes
-    indices = nodes.sindex.nearest(geom, max_distance=max_dist, return_all=False)
+    indices = nodes.sindex.nearest(
+        geom.geometry, max_distance=max_dist, return_all=False
+    )
     # Create a DataFrame to store nearest node results
-    indices = pd.DataFrame({
-        'geom_idx': list(geometries.iloc[indices[0]].index),  # Indices of the geometries
-        'node_idx': list(nodes.iloc[indices[1]].index)   # Corresponding indices of nearest nodes
-    })
-    
-    # Drop duplicates to ensure a 1-to-1 mapping between geometries and nodes
-    indices = indices.drop_duplicates('geom_idx').reset_index(drop=True)
+    geom["index"] = list(geom.index)
+    geom = geom.reset_index(drop=True)
+    geom.loc[indices[0], "node_id"] = nodes.iloc[indices[1]].index
+    geom = geom.drop_duplicates("index").reset_index(drop=True)
+    return list(geom["node_id"].astype(int))
 
-    # Return lists of corresponding indices of geometries and nodes
-    return list(indices['geom_idx']), list(indices['node_idx'])
 
-def add_points_to_graph_gdfs(points: gpd.GeoDataFrame | gpd.GeoSeries, nodes: gpd.GeoDataFrame, edges: gpd.GeoDataFrame,
-                             min_node_id: int = None, max_dist: float = None, min_dist: float = 0, indices: list = None, tolerance: float = 0.01):
-    """ 
-    Returns the nodes_gdf and edges_gdf and a list with the new node_ids
-    """
-    from . import utils
-    import shapely
-    import warnings
-    import pandas as pd
-    import numpy as np
-    
-    # Make copies of inputs to avoid modifying the original ones
-    points = points.copy()
-    nodes = nodes.copy()
-    edges = edges.copy()
+def nearest_edges(
+    geometries: gpd.GeoDataFrame | gpd.GeoSeries, G, max_dist: float | None = None
+):
+    edges = ox.graph_to_gdfs(G, nodes=False)
+    geom = geometries.geometry.to_crs(edges.crs)
+    indices = edges.sindex.nearest(geom, max_distance=max_dist)
+    geom["index"] = list(geom.index)
+    geom = geom.reset_index(drop=True)
+    geom.loc[indices[0], "edge_id"] = edges.iloc[indices[1]].index
+    geom = geom.drop_duplicates("index").reset_index(drop=True)
+    return list(geom["edge_id"])
 
+
+def __polars_linestring_to_points(df, id_col=["u", "v", "key"], length: bool = False):
+    df = df.lazy()
+    df = (
+        df.with_columns(
+            [
+                # Remove 'LINESTRING(' and ')' and split into point strings
+                pl.col("geometry")
+                .str.replace_all(r"LINESTRING\s*\(", "")
+                .str.replace_all(r"\)", "")
+                .str.split(", ")
+                .alias("point_list")
+            ]
+        )
+        .explode("point_list")
+        .with_columns(
+            [
+                # pt_sequence based on position after explode
+                pl.col("point_list").cum_count().over(id_col).alias("pt_sequence"),
+                # Split each point into x and y
+                pl.col("point_list").str.split(" "),
+            ]
+        )
+        .with_columns(
+            [
+                pl.col("point_list").list.get(0).cast(pl.Float64).alias("pt_x"),
+                pl.col("point_list").list.get(1).cast(pl.Float64).alias("pt_y"),
+            ]
+        )
+    ).drop("point_list", "geometry")
+
+    if length:
+        # Compute Euclidean distance between consecutive points per edge
+        # First, create lagged x and y
+        df = (
+            df.sort(id_col, "pt_sequence")
+            .with_columns(
+                pl.col("pt_x").shift(1).over(id_col).alias("prev_x"),
+                pl.col("pt_y").shift(1).over(id_col).alias("prev_y"),
+            )
+            .with_columns(
+                (
+                    (pl.col("pt_x") - pl.col("prev_x")) ** 2
+                    + (pl.col("pt_y") - pl.col("prev_y")) ** 2
+                )
+                .sqrt()
+                .alias("length")
+            )
+            .drop("prev_x", "prev_y")
+            .with_columns(pl.col("length").cum_sum().over(id_col).alias("length"))
+        )
+
+    return df.collect()
+
+
+def __split_at_edges(nodes_gdf, edges_gdf, new_edges_gdf):
+    edges_gdf = edges_gdf[~edges_gdf.index.isin(list(new_edges_gdf.index))]
+
+    new_edges_gdf = new_edges_gdf.reset_index()
+    new_edges_gdf["edge_index"] = new_edges_gdf.index
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=UserWarning,
+            message="Geometry column does not contain geometry.",
+        )
+        edge_selection = new_edges_gdf[
+            ["u", "v", "key", "edge_index"] + EDGE_COLS + ["length", "geometry"]
+        ].copy()
+        edge_selection["geometry"] = edge_selection["geometry"].to_wkt()
+        edge_selection["geometry"] = edge_selection["geometry"].astype(str)
+        edge_selection[EDGE_COLS] = edge_selection[EDGE_COLS].astype(str)
+        edge_selection_pl = pl.from_pandas(edge_selection)
+
+    new_edges = new_edges_gdf[
+        ["u", "v", "key", "edge_index"]
+        + EDGE_COLS
+        + ["length", "geometry"]
+        + ["new_node_id", "point"]
+    ].copy()
+    new_edges[EDGE_COLS] = new_edges[EDGE_COLS].astype(str)
+    new_edges["pt_x"] = new_edges["point"].get_coordinates()["x"]
+    new_edges["pt_y"] = new_edges["point"].get_coordinates()["y"]
+    new_edges = new_edges.drop(columns=["point", "geometry"])
+    new_edges_pl = pl.from_pandas(new_edges)
+
+    new_nodes_gdf = gpd.GeoDataFrame(
+        new_edges_gdf[NODE_COLS + ["new_node_id"]],
+        geometry=new_edges_gdf["point"],
+        crs=nodes_gdf.crs,
+    )
+    new_nodes_gdf["x"] = new_nodes_gdf["geometry"].get_coordinates()["x"]
+    new_nodes_gdf["y"] = new_nodes_gdf["geometry"].get_coordinates()["y"]
+    new_nodes_gdf = new_nodes_gdf.rename(columns={"new_node_id": "osmid"})
+    for c in NODE_COLS:
+        if c not in new_nodes_gdf.columns:
+            new_nodes_gdf[c] = None
+
+    new_nodes_gdf = new_nodes_gdf[["osmid", "x", "y"] + NODE_COLS + ["geometry"]]
+    new_nodes_gdf[NODE_COLS] = new_nodes_gdf[NODE_COLS].astype(str)
+    new_nodes_gdf = new_nodes_gdf.drop_duplicates("osmid")
+    new_nodes_gdf = new_nodes_gdf.set_index("osmid")
+
+    edge_selection_pl = __polars_linestring_to_points(
+        edge_selection_pl, id_col="edge_index", length=True
+    )
+    edge_selection_pl = edge_selection_pl.with_columns(
+        pl.lit(None).cast(int).alias("new_node_id")
+    )
+    edge_selection_pl = edge_selection_pl.with_columns(
+        pl.col("pt_sequence").cast(int).alias("pt_sequence")
+    )
+
+    new_edges_pl = new_edges_pl.with_columns(
+        pl.lit(None).cast(int).alias("pt_sequence")
+    )
+
+    columns = (
+        ["u", "v", "key", "edge_index"]
+        + EDGE_COLS
+        + ["length", "pt_x", "pt_y", "pt_sequence", "new_node_id"]
+    )
+    new_edges_pl = new_edges_pl.select(columns)
+    edge_selection_pl = edge_selection_pl.select(columns)
+    edge_selection_pl = pl.concat([edge_selection_pl, new_edges_pl, new_edges_pl])
+
+    edge_selection_pl = (
+        edge_selection_pl.sort(["edge_index", "length"])  # Ensure proper order
+        .with_columns(
+            # Compute cumulative sum of nulls per edge_index
+            (
+                pl.col("pt_sequence")
+                .is_null()
+                .cast(pl.Int8)
+                .cum_sum()
+                .over("edge_index")
+                / 2
+            )
+            .floor()
+            .cast(pl.Int8)
+            .alias("new_point_count")
+        )
+        .with_columns(
+            # Concatenate to form something like "edge123_2"
+            pl.concat_str(
+                [
+                    pl.col("edge_index").cast(pl.Utf8),
+                    pl.lit("_"),
+                    pl.col("new_point_count").cast(pl.Utf8),
+                ]
+            ).alias("edge_index"),
+            pl.concat_str(
+                [
+                    pl.col("pt_x").cast(pl.Utf8),
+                    pl.lit(" "),
+                    pl.col("pt_y").cast(pl.Utf8),
+                ]
+            ).alias("points"),
+        )
+        .group_by("edge_index")
+        .agg(
+            pl.col("new_node_id").sort_by("length").first().alias("new_u"),
+            pl.col("new_node_id").sort_by("length").last().alias("new_v"),
+            pl.col(["u", "v", "key"] + EDGE_COLS).first(),
+            pl.col("points").sort_by("length"),
+        )
+        .with_columns(
+            pl.concat_str(
+                [pl.lit("LINESTRING("), pl.col("points").list.join(", "), pl.lit(")")]
+            ).alias("geometry"),
+            (
+                pl.when(pl.col("new_u").is_not_null())
+                .then(pl.col("new_u"))
+                .otherwise(pl.col("u"))
+            ).alias("u"),
+            (
+                pl.when(pl.col("new_v").is_not_null())
+                .then(pl.col("new_v"))
+                .otherwise(pl.col("v"))
+            ).alias("v"),
+        )
+        .drop("points", "new_u", "new_v")
+        .with_columns((pl.col("u").cum_count().over(["u", "v"]) - 1).alias("key"))
+    ).drop("edge_index")
+
+    new_edges_gdf = edge_selection_pl.to_pandas()
+    new_edges_gdf = gpd.GeoDataFrame(
+        new_edges_gdf,
+        geometry=gpd.GeoSeries.from_wkt(new_edges_gdf["geometry"]),
+        crs=edges_gdf.crs,
+    )
+    new_edges_gdf["length"] = new_edges_gdf.length
+    new_edges_gdf = new_edges_gdf[
+        ["u", "v", "key"] + EDGE_COLS + ["length", "geometry"]
+    ]
+    new_edges_gdf["u"] = new_edges_gdf["u"].astype(int)
+    new_edges_gdf["v"] = new_edges_gdf["v"].astype(int)
+    new_edges_gdf["key"] = new_edges_gdf["key"].astype(int)
+    new_edges_gdf = new_edges_gdf.set_index(["u", "v", "key"])
+
+    edges_gdf = pd.concat([new_edges_gdf, edges_gdf])
+
+    nodes_gdf = pd.concat([nodes_gdf, new_nodes_gdf.drop_duplicates()])
+
+    return nodes_gdf, edges_gdf
+
+
+def add_points_to_graph(
+    points: gpd.GeoDataFrame | gpd.GeoSeries,
+    G,
+    max_dist: float | None = None,
+    min_edge_length: float = 0,
+):
     if len(points) == 0:
-        return nodes, edges, []
+        return G, []
 
-    if type(points) == gpd.GeoSeries:
-        points = gpd.GeoDataFrame({},geometry=points.geometry,crs=points.crs)
+    graph_attrs = G.graph
+    points = points.to_crs(G.graph["crs"]).copy()
 
-    # Reproject points to match the CRS of edges
-    points = points.to_crs(edges.crs)
+    nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
+    nodes_gdf[NODE_COLS] = nodes_gdf[NODE_COLS].astype(str)
+    edges_gdf[EDGE_COLS] = edges_gdf[EDGE_COLS].astype(str)
 
-    # Check if indices are provided and match the length of points
-    if isinstance(indices, list) and len(indices) != len(points):
-        raise Exception(f"Length of indices is {len(indices)} but you gave {len(points)} points.")
-
-    if isinstance(indices, list):
-        points['indices'] = indices
-        # Ensure no duplicate node ids exist in the nodes GeoDataFrame
-        if any(points['indices'].isin(nodes.index)):
-            raise Exception(f"Node id {points.loc[points['indices'].isin(nodes.index),'indices']} already exists.")
-
-    points = points.explode().reset_index(drop=True)
-    
-
-    # Create a copy of the edges GeoDataFrame for manipulation
-    nearest_edges_df = edges.copy()
-    
-    # Assign unique edge IDs to edges
-    unique_edge_ids = list(range(len(nearest_edges_df)))
-    nearest_edges_df['edge_id'] = unique_edge_ids
-
-
-    nearest_indices = nearest_edges_df.sindex.nearest(points.geometry.centroid, max_distance=max_dist)
-    nearest_edges_helper = nearest_edges_df.iloc[nearest_indices[1, :]].copy()
-
+    nearest_indices = edges_gdf.sindex.nearest(points.geometry, max_distance=max_dist)
+    new_edges_gdf = edges_gdf.iloc[nearest_indices[1, :]]
+    new_edges_gdf = new_edges_gdf.reset_index()
+    new_edges_gdf["edge_index"] = new_edges_gdf.index
     points = points.iloc[nearest_indices[0, :]]
-    nearest_edges_helper['projected_dist'] = nearest_edges_helper.project(points.geometry.centroid, align=False)
-    points['geometry'] = list(nearest_edges_helper.interpolate(nearest_edges_helper['projected_dist']))
-    points = points.set_geometry('geometry')
 
-    # Find the nearest edges to each point using spatial indexing
-    nearest_indices = nearest_edges_df.sindex.nearest(points.geometry.centroid.buffer(tolerance, resolution=3), max_distance=tolerance)
-    nearest_edges_df = nearest_edges_df.iloc[nearest_indices[1, :]]
+    new_edges_gdf["projected_dist"] = new_edges_gdf.project(
+        points.geometry, align=False
+    )
 
-    # If indices are provided, assign new node ids
-    if isinstance(indices, list):
-        nearest_edges_df['new_node_id'] = list(points.iloc[nearest_indices[0, :]]['indices'])
-
-    # Project points onto nearest edges and calculate projected distance
-    nearest_edges_df['projected_dist'] = nearest_edges_df.project(points.geometry.centroid.iloc[nearest_indices[0, :]], align=False)
-
-    # Sort edges based on edge_id and projected distance
-    nearest_edges_df = nearest_edges_df.sort_values(['edge_id', 'projected_dist']).reset_index()
+    if ("id" in points.columns) and (points["id"].dtype == int):
+        new_edges_gdf["new_node_id"] = list(points["id"])
 
     # Remove points too close to edge limits (less than min_dist)
-    nearest_edges_df = nearest_edges_df.loc[nearest_edges_df['projected_dist'] > (min_dist + tolerance)]
-    nearest_edges_df = nearest_edges_df.loc[(nearest_edges_df.geometry.length - nearest_edges_df['projected_dist']) > (min_dist + tolerance)]
+    new_edges_gdf = new_edges_gdf.loc[new_edges_gdf["projected_dist"] > min_edge_length]
+    new_edges_gdf = new_edges_gdf.loc[
+        (new_edges_gdf.geometry.length - new_edges_gdf["projected_dist"])
+        > min_edge_length
+    ]
 
-    if len(nearest_edges_df) == 0:
-        return nodes, edges, []
+    new_edges_gdf = new_edges_gdf.reset_index(drop=True)
 
-    # Remove duplicated points added to the same edge
-    nearest_edges_df = nearest_edges_df.drop_duplicates(['edge_id', 'projected_dist'])
-    nearest_edges_df = nearest_edges_df.sort_values(['edge_id', 'projected_dist']).reset_index(drop=True)
-
-    # Ensure no points are added to the same edge within min_dist
-    idx_help = np.array(nearest_edges_df.index) - 1
-    idx_help[0] = 0 
-
-    nearest_edges_df['projected_dist_next'] = list(np.abs(np.array(nearest_edges_df['projected_dist']) - np.array(nearest_edges_df.loc[idx_help, 'projected_dist'])))
-    nearest_edges_df.loc[0, 'projected_dist_next'] = 999
-    nearest_edges_df['edge_id_next'] = list(nearest_edges_df.loc[idx_help, 'edge_id'])
-    nearest_edges_df = nearest_edges_df.loc[(nearest_edges_df['edge_id'] != nearest_edges_df['edge_id_next']) | (nearest_edges_df['projected_dist_next'] > (min_dist + tolerance))]
-    nearest_edges_df = nearest_edges_df.drop(columns=['projected_dist_next', 'edge_id_next'])
-
-    if len(nearest_edges_df) == 0:
-        return nodes, edges, []
-
-    # Interpolate and snap the projected points to the edge
-    nearest_edges_df['projected_point'] = nearest_edges_df.interpolate(nearest_edges_df['projected_dist'])
-    nearest_edges_df['projected_point'] = shapely.snap(nearest_edges_df['projected_point'], nearest_edges_df['projected_point'], tolerance=(min_dist + tolerance))
-    
-    # Create a unique identifier for each projected point to avoid duplicates
-    nearest_edges_df['point_str'] = nearest_edges_df['projected_point'].to_wkt().astype(str)
-    nearest_edges_df = nearest_edges_df.drop_duplicates(['point_str', 'edge_id'])
-
-    indices_df = nearest_edges_df.drop_duplicates(['point_str'])
-
-    # Handle node id assignment based on provided or default min_node_id
-    if indices is None:
-        if min_node_id is None:
-            warnings.warn("min_node_id keyword was not provided. New node ids could be wrong.")
-            min_node_id = min(nodes.index)
-        
-        if min_node_id > min(nodes.index):
-            warnings.warn(f"min_node_id keyword {min_node_id} is larger than the minimum node id. New node ids could be wrong.")
-            min_node_id = min(nodes.index)
-
-        min_node_id = min_node_id - 1
-        if min_node_id > 0:
-            min_node_id = -1
-
-        indices_df = pd.DataFrame({'point_str': list(indices_df['point_str']),
-                                   'new_node_id': range((min_node_id - len(indices_df)) + 1, min_node_id + 1)})
-    else:
-        indices_df = pd.DataFrame({'point_str': list(indices_df['point_str']),
-                                   'new_node_id': list(indices_df['new_node_id'])})
-        nearest_edges_df = nearest_edges_df.drop(columns=['new_node_id'])
-
-    nearest_edges_df = nearest_edges_df.merge(indices_df, on='point_str')
-    nearest_edges_df = nearest_edges_df.drop(columns=['point_str'])
-    nearest_edges_df = nearest_edges_df.sort_values(['edge_id', 'projected_dist']).reset_index(drop=True)
-
-    # Create a group of edges and update the geometries
-    edges_group = nearest_edges_df[['edge_id', 'projected_point']]
-    edges_group = edges_group.set_geometry('projected_point', crs=nearest_edges_df.crs)
-    edges_group = edges_group.dissolve(['edge_id'], sort=False).sort_values('edge_id').reset_index()
-    edges_group['edge_geometry'] = list(nearest_edges_df.drop_duplicates(['edge_id']).sort_values('edge_id').geometry)
-
-    # Split geometries and assign the updated geometries to edges
-    for i in edges_group.index:
-        edges_group.loc[i, 'edge_geometry'] = utils.complex_split(edges_group.loc[i, 'edge_geometry'], edges_group.loc[i, 'projected_point'], tolerance=tolerance)
-
-    edges_group = edges_group.set_geometry('edge_geometry', crs=nearest_edges_df.crs)
-    edges_group = edges_group.explode('edge_geometry')
-
-    new_edges = nearest_edges_df.drop_duplicates('edge_id')
-    new_edges = new_edges.merge(edges_group[['edge_id', 'edge_geometry']], on='edge_id')
-    new_edges = new_edges.rename(columns={'geometry': 'temp', 'edge_geometry': 'geometry'})
-    new_edges = new_edges.drop(columns=['temp'])
-    new_edges['length'] = new_edges.geometry.length
-    new_edges = new_edges.sort_values(['edge_id', 'projected_dist'])
-
-    # Identify unique edge indices
-    u_inds = np.unique(new_edges['edge_id'].searchsorted(new_edges['edge_id'], side='left'))
-    v_inds = np.unique(new_edges['edge_id'].searchsorted(new_edges['edge_id'], side='right') - 1)
-
-    # Assign new node ids to edges
-    new_edges.loc[new_edges.index.isin(u_inds) == False, 'u'] = list(nearest_edges_df.sort_values(['edge_id', 'projected_dist'])['new_node_id'])
-    new_edges.loc[new_edges.index.isin(v_inds) == False, 'v'] = list(nearest_edges_df.sort_values(['edge_id', 'projected_dist'])['new_node_id'])
-
-    # Update edge indices
-    new_edges = new_edges.set_index(['u', 'v', 'key'])
-    new_edges = new_edges.drop(columns=['edge_id', 'projected_point', 'projected_dist', 'new_node_id'])
-
-    # Exclude edges to be deleted
-    delete_edge_ids = pd.MultiIndex.from_frame(nearest_edges_df[['u', 'v', 'key']])
-    all_edges = edges.loc[edges.index.isin(delete_edge_ids) == False]
-    all_edges = pd.concat([all_edges, new_edges])
-
-    # Add new nodes
-    new_nodes = nodes.loc[list(nearest_edges_df['u'])]
-    new_nodes['osmid'] = list(nearest_edges_df['new_node_id'])
-    new_nodes.geometry = list(nearest_edges_df['projected_point'])
-    new_nodes = new_nodes.drop_duplicates(['osmid'])
-    new_nodes['x'] = new_nodes.geometry.get_coordinates()['x']
-    new_nodes['y'] = new_nodes.geometry.get_coordinates()['y']
-    new_nodes = new_nodes.set_index('osmid')
-
-    # Combine original and new nodes
-    all_nodes = pd.concat([nodes, new_nodes])
-    all_nodes['x'] = all_nodes.geometry.get_coordinates()['x']
-    all_nodes['y'] = all_nodes.geometry.get_coordinates()['y']
-
-    return all_nodes, all_edges, list(new_nodes.index)
-
-def add_points_to_graph_gdfs_old(points:gpd.GeoDataFrame|gpd.GeoSeries,nodes:gpd.GeoDataFrame,edges:gpd.GeoDataFrame,
-                            min_node_id:int=None,max_dist:float=None,min_dist:float=0,indices:list=None,tolerance:float=0.001):
-    """ 
-    Returns the nodes_gdf and edges_gdf and a list with the new node_ids
-    """
-    from . import utils
-    import shapely
-    if len(points) == 0:
-        return nodes, edges, []
-    
-    unique_edge_ids = list(range(len(edges)))
-    edges['edge_id'] = unique_edge_ids
-
-    points = points.to_crs(edges.crs)
-    if (type(indices) == list) and (len(indices) != len(points)):
-        raise Exception(f"Length of indices is {len(indices)} but you gave {len(points)} points.")
-
-    if type(indices) == list:
-        points['indices'] = indices 
-        if any(points['indices'].isin(nodes.index)):
-            raise Exception(f"Node id {points.loc[points['indices'].isin(nodes.index),'indices']} already exists.")
-
-    points = points.explode().reset_index(drop=True)
-
-    nearest_edges_df = edges.copy()
-
-    nearest_indices = nearest_edges_df.sindex.nearest(points.geometry.centroid.buffer(tolerance,resolution=3),max_distance=max_dist)
-    nearest_edges_df = nearest_edges_df.iloc[nearest_indices[1,:]]
-
-    if type(indices) == list:
-        nearest_edges_df['new_node_id'] = list(points.iloc[nearest_indices[0,:]]['indices'])
-
-    nearest_edges_df['projected_dist'] = nearest_edges_df.project(points.geometry.centroid.iloc[nearest_indices[0,:]],align=False)
-
-    nearest_edges_df = nearest_edges_df.sort_values(['edge_id','projected_dist']).reset_index()
-
-    # Delete points if they are less than min_dist from edge limits
-
-    nearest_edges_df = nearest_edges_df.loc[nearest_edges_df['projected_dist'] > (min_dist + tolerance)]
-    nearest_edges_df = nearest_edges_df.loc[(nearest_edges_df.geometry.length - nearest_edges_df['projected_dist']) > (min_dist + tolerance)]
-
-    if len(nearest_edges_df) == 0:
-        return nodes, edges, []
-
-    # Delete repeated points to be added on the same edge
-
-    nearest_edges_df = nearest_edges_df.drop_duplicates(['edge_id','projected_dist'])
-    nearest_edges_df = nearest_edges_df.sort_values(['edge_id','projected_dist']).reset_index(drop=True)
-
-    # Do not add point if another point is going to be added to the same edge and it is less than min_dist away.
-
-    idx_help = np.array(nearest_edges_df.index) - 1
-    idx_help[0] = 0 
-
-    nearest_edges_df['projected_dist_next'] = list(np.abs(np.array(nearest_edges_df['projected_dist']) - np.array(nearest_edges_df.loc[idx_help,'projected_dist'])))
-    nearest_edges_df.loc[0,'projected_dist_next'] = 999 
-    nearest_edges_df['edge_id_next'] = list(nearest_edges_df.loc[idx_help,'edge_id'])
-    nearest_edges_df = nearest_edges_df.loc[(nearest_edges_df['edge_id'] != nearest_edges_df['edge_id_next']) | (nearest_edges_df['projected_dist_next'] > (min_dist + tolerance))]
-    nearest_edges_df = nearest_edges_df.drop(columns=['projected_dist_next','edge_id_next'])
-
-    if len(nearest_edges_df) == 0:
-        return nodes, edges, []
-
-    nearest_edges_df['projected_point'] = nearest_edges_df.interpolate(nearest_edges_df['projected_dist'])
-    nearest_edges_df['projected_point'] = shapely.snap(nearest_edges_df['projected_point'],nearest_edges_df['projected_point'],tolerance=(min_dist + tolerance))
-    
-    nearest_edges_df['point_str'] = nearest_edges_df['projected_point'].to_wkt().astype(str)
-    nearest_edges_df = nearest_edges_df.drop_duplicates(['point_str','edge_id'])
-    
-    indices_df = nearest_edges_df.drop_duplicates(['point_str'])
-
-    if type(indices) == type(None):
-        if type(min_node_id) == type(None):
-            warnings.warn("min_node_id keyword was not provided. New node ids could be wrong.")
-            min_node_id = min(nodes.index)
-        
-        if min_node_id > min(nodes.index):
-            warnings.warn(f"min_node_id keyword {min_node_id} is larger than the minimum node id. New node ids could be wrong.")
-            min_node_id = min(nodes.index)
-
-        min_node_id = min_node_id - 1
-        if min_node_id > 0:
-            min_node_id = -1
-
-        indices_df = pd.DataFrame({'point_str' : list(indices_df['point_str']),
-        'new_node_id' : range((min_node_id - len(indices_df)) + 1,min_node_id+1)
-        })
-    else:
-        indices_df = pd.DataFrame({'point_str' : list(indices_df['point_str']),
-        'new_node_id' : list(indices_df['new_node_id'])
-        })
-        nearest_edges_df = nearest_edges_df.drop(columns=['new_node_id'])
-
-    nearest_edges_df = nearest_edges_df.merge(indices_df,on='point_str')
-    nearest_edges_df = nearest_edges_df.drop(columns=['point_str'])
-    nearest_edges_df = nearest_edges_df.sort_values(['edge_id','projected_dist']).reset_index(drop=True)
-
-    edges_group = nearest_edges_df[['edge_id','projected_point']]
-    edges_group = edges_group.set_geometry('projected_point',crs=nearest_edges_df.crs)
-    edges_group = edges_group.dissolve(['edge_id'],sort=False).sort_values('edge_id').reset_index()
-    edges_group['edge_geometry'] = list(nearest_edges_df.drop_duplicates(['edge_id']).sort_values('edge_id').geometry)
-
-    for i in edges_group.index:
-        edges_group.loc[i,'edge_geometry'] = utils.complex_split(edges_group.loc[i,'edge_geometry'],edges_group.loc[i,'projected_point'],tolerance=tolerance)
-
-    edges_group = edges_group.set_geometry('edge_geometry',crs=nearest_edges_df.crs)
-    edges_group = edges_group.explode('edge_geometry')
-    #edges_group = edges_group.loc[edges_group.geometry.length > tolerance]
-
-    new_edges = nearest_edges_df.drop_duplicates('edge_id')
-    new_edges = new_edges.merge(edges_group[['edge_id','edge_geometry']],on='edge_id')
-    new_edges = new_edges.rename(columns={'geometry':'temp','edge_geometry':'geometry'})
-    new_edges = new_edges.drop(columns=['temp'])
-    new_edges['length'] = new_edges.geometry.length
-    new_edges = new_edges.sort_values(['edge_id','projected_dist'])
-
-    u_inds = np.unique(new_edges['edge_id'].searchsorted(new_edges['edge_id'],side='left'))
-    v_inds = np.unique(new_edges['edge_id'].searchsorted(new_edges['edge_id'],side='right') - 1)
-
-    new_edges.loc[new_edges.index.isin(u_inds) == False,'u'] = list(nearest_edges_df.sort_values(['edge_id','projected_dist'])['new_node_id'])
-    new_edges.loc[new_edges.index.isin(v_inds) == False,'v'] = list(nearest_edges_df.sort_values(['edge_id','projected_dist'])['new_node_id'])
-
-    #new_edges.index=pd.MultiIndex.from_frame(new_edges[['u','v','key']])
-    new_edges = new_edges.set_index(['u','v','key'])
-    new_edges=new_edges.drop(columns=['edge_id','projected_point','projected_dist','new_node_id'])
-
-    delete_edge_ids = pd.MultiIndex.from_frame(nearest_edges_df[['u','v','key']])
-    all_edges = edges.loc[edges.index.isin(delete_edge_ids) == False]
-    all_edges = pd.concat([all_edges,new_edges])
-
-    new_nodes = nodes.loc[list(nearest_edges_df['u'])]
-
-    new_nodes['osmid'] = list(nearest_edges_df['new_node_id'])
-    new_nodes.geometry = list(nearest_edges_df['projected_point'])
-    new_nodes = new_nodes.drop_duplicates(['osmid'])
-    new_nodes['x'] = new_nodes.geometry.get_coordinates()['x']
-    new_nodes['y'] = new_nodes.geometry.get_coordinates()['y']
-    new_nodes = new_nodes.set_index('osmid')
-
-    all_nodes = pd.concat([nodes,new_nodes])
-    all_nodes['x'] = all_nodes.geometry.get_coordinates()['x']
-    all_nodes['y'] = all_nodes.geometry.get_coordinates()['y']
-
-    return all_nodes,all_edges, list(new_nodes.index)
-
-def add_points_to_graph(points:gpd.GeoDataFrame|gpd.GeoSeries,G,max_dist:float=None,min_dist:float=0,indices:list=None,tolerance:float=0.01):
-    """ 
-    Returns the graph and a list with the new node_ids
-    """
-    if len(points) == 0:
-        return G, []
-    
-    nodes, edges = ox.graph_to_gdfs(G)
-    all_nodes, all_edges, new_node_ids = add_points_to_graph_gdfs(points,nodes,edges,
-                                            min_node_id=min(G.nodes),max_dist=max_dist,min_dist=min_dist,indices=indices,tolerance=tolerance)
-    if len(new_node_ids) == 0:
-        return G, []
-    
-    return ox.graph_from_gdfs(all_nodes,all_edges,graph_attrs=G.graph), new_node_ids
-
-def add_intersection_to_graph(geometries:gpd.GeoSeries|gpd.GeoDataFrame,G,max_dist:float=None,min_dist:float=0,indices:list=None,tolerance=1.0e-4,_edge_union=None):
-    """ 
-    Returns the graph and a list with the new node_ids
-    """
-    import shapely
-    if type(_edge_union) == type(None):
-        edges = ox.graph_to_gdfs(G,nodes=False)
-        crs = edges.crs
-        _edge_union = edges.union_all()
-    else:
-        if (type(_edge_union) == gpd.GeoSeries) or (type(_edge_union) == gpd.GeoDataFrame):
-            crs = _edge_union.crs 
-            _edge_union = _edge_union.union_all()
+    if len(new_edges_gdf) == 0:
+        if max_dist is None:
+            return G, nearest_nodes(points, G)  # This is not the most efficient way
         else:
-            crs = graph_crs(G)
+            return G, nearest_nodes(
+                points, G, max_dist=min_edge_length + max_dist + 0.01
+            )  # This is not the most efficient way
 
-    geometries = geometries.geometry.to_crs(crs) 
+    if ("id" in points.columns) and (points["id"].dtype == int):
+        if any(points["id"].isin(nodes_gdf.index)):
+            warnings.warn(
+                "Some of the ids in points column 'id' are in nodes 'osmid'. Using default ids."
+            )
+            min_id = nodes_gdf.index.max() + 1
+            new_edges_gdf["new_node_id"] = min_id + points.index
+    else:
+        min_id = nodes_gdf.index.max() + 1
+        new_edges_gdf["new_node_id"] = min_id + points.index
 
-    is_polygon = (geometries.type == 'Polygon') | (geometries.type == 'MultiPolygon')
-    geometries.loc[is_polygon] = geometries.loc[is_polygon].boundary
+    new_edges_gdf["point_edge_id"] = round(
+        new_edges_gdf["projected_dist"] / min_edge_length
+    ).astype(int)
+    new_edges_gdf["projected_dist"] = new_edges_gdf.groupby(
+        ["edge_index", "point_edge_id"]
+    )["projected_dist"].transform("mean")
+    new_edges_gdf = new_edges_gdf.drop_duplicates(
+        ["edge_index", "projected_dist"]
+    ).sort_values(["edge_index", "projected_dist"])
 
-    geometries = list(geometries)
-    inter = shapely.intersection(geometries,_edge_union)
-    inter = gpd.GeoSeries(inter,crs=crs)
+    new_edges_gdf["diff"] = new_edges_gdf.groupby("edge_index")["projected_dist"].diff()
+    new_edges_gdf.loc[new_edges_gdf["diff"] < min_edge_length, "point_edge_id"] -= 1
+    new_edges_gdf["projected_dist"] = new_edges_gdf.groupby(
+        ["edge_index", "point_edge_id"]
+    )["projected_dist"].transform("mean")
+    new_edges_gdf = new_edges_gdf.drop_duplicates(["edge_index", "projected_dist"])
 
-    if type(indices) == list:
-        if len(indices) != len(geometries):
-            raise Exception(f"Length of geometries is {len(geometries)} but length of indices is {len(indices)}.")
-        
-        indices = list(np.array(indices)[np.array(inter.is_empty == False)])
+    new_edges_gdf["point"] = new_edges_gdf.interpolate(new_edges_gdf["projected_dist"])
+    new_edges_gdf["length"] = new_edges_gdf["projected_dist"]
 
-    inter = inter.loc[inter.is_empty == False]
+    new_edges_gdf["u"] = new_edges_gdf["u"].astype(int)
+    new_edges_gdf["v"] = new_edges_gdf["v"].astype(int)
+    new_edges_gdf["key"] = new_edges_gdf["key"].astype(int)
+    new_edges_gdf = new_edges_gdf.set_index(["u", "v", "key"])
 
-    G_copy, nodes = add_points_to_graph(points=inter,G=G,max_dist=max_dist,min_dist=min_dist,indices=indices,tolerance=tolerance)
-    return G_copy, nodes
+    nodes_gdf, edges_gdf = __split_at_edges(nodes_gdf, edges_gdf, new_edges_gdf)
 
-def geometries_to_nodes(geometries:gpd.GeoSeries|gpd.GeoDataFrame,G,min_dist:float=0,max_dist:float=None,add_points:bool = True, edges:gpd.GeoDataFrame=None):
-    """
-    Returns gpd.GeoDataFrame with geometries and node_ids repeating the geometry if there are multiple matching node_ids.
-        and the graph
-    """
-    import shapely
-    G_copy = G.copy()
-    new_geometries = geometries.copy().reset_index(drop=True)
-    new_geometries['geometry_id'] = new_geometries.index
-    #new_geometries['osmid'] = np.nan
-    points = new_geometries.geometry.loc[(new_geometries.geometry.type == 'Point') | (new_geometries.geometry.type == 'MultiPoint')]
-    if len(points) > 0:
-        if add_points:
-            G_copy,_ = add_points_to_graph(points,G_copy,min_dist=min_dist,max_dist=max_dist,tolerance=1.0e-4)
-
-        ids,n = nearest_nodes(points,G_copy,max_dist=max_dist)
-        if len(ids) > 0:
-            new_geometries.loc[ids,'osmid'] = n
-
-    polygons_and_lines = new_geometries.geometry.loc[(new_geometries.geometry.type != 'Point') & (new_geometries.geometry.type != 'MultiPoint')]
-    if len(polygons_and_lines) > 0:
-        if type(edges) == type(None):
-            edges = ox.graph_to_gdfs(G_copy,nodes=False)
-
-        polygons_and_lines = polygons_and_lines.to_crs(edges.crs)
-        is_polygon = (polygons_and_lines.type == 'Polygon') | (polygons_and_lines.type == 'MultiPolygon')
-        polygons_and_lines.loc[is_polygon] = polygons_and_lines.loc[is_polygon].boundary
-        inter = shapely.intersection(list(polygons_and_lines),edges.union_all())
-        inter = gpd.GeoDataFrame(geometry=inter,crs=edges.crs)
-        inter['ids'] = polygons_and_lines.index
-        inter = inter.explode('geometry').reset_index(drop=True)
-        inter = inter.loc[inter.geometry.isna() == False]
-        inter = inter.loc[inter.geometry.is_empty == False].reset_index(drop=True)
-        if add_points:
-            G_copy,_ = add_points_to_graph(points=inter,G=G_copy,max_dist=0.001,min_dist=min_dist,tolerance=1.0e-4)
-        
-        if min_dist <= 0:
-            min_dist = 0.001
-
-        ids,n = nearest_nodes(inter,G_copy,max_dist = (min_dist + 1.0e-4))
-        if len(ids) > 0:
-            ids = inter.loc[ids,'ids']
-            new_geoms = new_geometries.loc[ids]
-            new_geoms['osmid'] = n
-            new_geoms = new_geoms.drop_duplicates()
-            new_geometries = pd.concat([new_geometries,new_geoms])
-
-    if 'osmid' not in new_geometries.columns:
-        return gpd.GeoDataFrame([],geometry=[],crs=new_geometries.crs), G
-
-    new_geometries = new_geometries.loc[new_geometries['osmid'].isna()==False]
-    new_geometries['osmid'] = new_geometries['osmid'].astype(int)
-    return new_geometries.drop_duplicates(), G_copy
-
-def graph_crs(G):
-    return ox.graph_to_gdfs(G,edges=False).crs
-
-def add_node_elevations_open_api(G):
-    orig_template = ox.settings.elevation_url_template
-    ox.settings.elevation_url_template = 'https://api.open-elevation.com/api/v1/lookup?locations={locations}'
-    crs = graph_crs(G)
-    G = ox.projection.project_graph(G,to_latlong=True)
-    G = ox.add_node_elevations_google(G,batch_size=250)
-    ox.settings.elevation_url_template = orig_template
-    G = ox.projection.project_graph(G,to_crs=crs)
-    return G
-
-def cluster_nodes(G,distance:float = 50,highway_priority:list = ['footway','residential']):
-    from sklearn.cluster import AgglomerativeClustering
-    import shapely
-    from . import utils
-
-    nodes,edges = ox.convert.graph_to_gdfs(G)
-    crs = edges.crs
-    if 'maxspeed' not in edges.columns:
-        edges['maxspeed'] = None 
-
-    edges = edges.reset_index()[['u','v','key','highway','maxspeed','length','geometry']]
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=UserWarning)
-        edges['geometry'] = edges['geometry'].to_wkt()
-        edges['geometry'] = edges['geometry'].astype(str)
-
-    edges['highway'] = edges['highway'].astype(str)
-    edges['maxspeed'] = edges['maxspeed'].astype(str)
-    edges = pl.from_pandas(edges)
-    nodes_geometry = nodes.geometry
-    nodes = nodes.drop(columns=['geometry'])
-    nodes = pl.from_pandas(nodes,include_index=True)
-    
-    cluster_func = AgglomerativeClustering(n_clusters=None,distance_threshold=distance, metric='euclidean',linkage='complete')
-
-    node_groups = gpd.GeoSeries(shapely.get_parts(nodes_geometry.buffer(distance/2,resolution=4).union_all()),crs=crs)
-    node_groups = utils.intersects_all_with_all(nodes_geometry,node_groups).astype(int) 
-    n_node_groups = node_groups.shape[1]
-    node_groups *= np.arange(n_node_groups)
-    node_groups = np.max(node_groups,axis=1)
-    nodes = nodes.with_columns(
-        node_group=node_groups,
-        cluster_id=0
+    G = ox.graph_from_gdfs(
+        gdf_nodes=nodes_gdf, gdf_edges=edges_gdf, graph_attrs=graph_attrs
     )
-    
-    max_cluster_id = -1
-    for i in range(n_node_groups):
-        mask = (nodes.select('node_group')==i).to_series()
-        nodes_subdf = nodes.filter(mask).select('x','y')
-        if len(nodes_subdf) == 0:
-            continue
-        
-        if len(nodes_subdf) == 1:
-            clusters = [0]
-        else:
-            clusters = cluster_func.fit(nodes_subdf)#list(zip(x,y)))
-            clusters = clusters.labels_
 
-        clusters = np.array(clusters) + max_cluster_id + 1
-        max_cluster_id = int(np.max(clusters))
-        clusters_long = np.zeros(len(nodes),dtype=int)
-        clusters_long[mask.to_numpy()] = clusters
-        nodes = nodes.with_columns(
-            cluster_id = pl.when(mask).then(clusters_long).otherwise(pl.col('cluster_id'))
-        )
+    if max_dist is None:
+        return G, nearest_nodes(points, G)  # This is not the most efficient way
+    else:
+        return G, nearest_nodes(
+            points, G, max_dist=min_edge_length + max_dist + 0.01
+        )  # This is not the most efficient way
 
-    nodes = nodes.group_by('cluster_id').agg(
-        pl.col('osmid').first(),
-        pl.col('osmid').alias('all_osmids'),
-        pl.col('x').mean(),
-        pl.col('y').mean()
-    )
-    edges = edges.join(nodes[['osmid','all_osmids','x','y']].explode('all_osmids'),left_on='u',right_on='all_osmids')
-    edges = edges.drop('u').rename({'osmid':'u','x':'x_u','y':'y_u'})
-    edges = edges.join(nodes[['osmid','all_osmids','x','y']].explode('all_osmids'),left_on='v',right_on='all_osmids')
-    edges = edges.drop('v').rename({'osmid':'v','x':'x_v','y':'y_v'})
 
-    edges = edges.filter(pl.col('u') != pl.col('v'))
-    edges=edges.group_by('u','v').agg(
-        pl.col('highway').str.concat(","),
-        pl.col('length','maxspeed','geometry').filter( #### revisar maxspeed
-            pl.col('length')==pl.col('length').min()
-        ).first(),
-        pl.col('x_u','y_u','x_v','y_v').first()
-    ).with_columns(key=0).sort('u','v','key')
-
-    for i in highway_priority: 
-        edges = edges.with_columns(
-            highway = pl.when(pl.col('highway').str.contains(i)).then(pl.lit(i)).otherwise(pl.col('highway'))
-        )
-
-    edges=edges.with_columns(
-    geometry = pl.col('geometry').str.replace("LINESTRING (","LINESTRING (" + pl.col('x_u').cast(str) + " " + pl.col('y_u').cast(str) + ",",literal=True)
-    )
-    edges=edges.with_columns(
-        geometry = pl.col('geometry').str.replace(")","," + pl.col('x_v').cast(str) + " " + pl.col('y_v').cast(str) + ")",literal=True)
-    )
-    edges=edges.drop('x_u','y_u','x_v','y_v','length')
-
-    nodes_gdf = nodes.to_pandas()
-    nodes_gdf = gpd.GeoDataFrame(nodes_gdf[['osmid','y','x']], geometry=gpd.points_from_xy(nodes_gdf["x"],nodes_gdf["y"]),crs=crs)
-    nodes_gdf = nodes_gdf.set_index('osmid')#.index = nodes_gdf['osmid']
-    #nodes_gdf = nodes_gdf.drop(columns='osmid')
-
-    edges_gdf = edges.to_pandas()
-    edges_gdf = edges_gdf.set_index(['u','v','key'])
-    #edges_gdf.index=pd.MultiIndex.from_frame(edges_gdf[['u','v','key']])
-    #edges_gdf=edges_gdf.drop(columns=['u','v','key'])
-    edges_gdf = gpd.GeoDataFrame(edges_gdf,geometry=gpd.GeoSeries.from_wkt(edges_gdf['geometry']),crs=crs)
-    edges_gdf['length'] = edges_gdf.geometry.length
-
-    nodes_gdf['x'] = nodes_gdf.geometry.get_coordinates()['x']
-    nodes_gdf['y'] = nodes_gdf.geometry.get_coordinates()['y']
-
-    G_copy = ox.graph_from_gdfs(gdf_nodes=nodes_gdf,gdf_edges=edges_gdf,graph_attrs=G.graph)
-    return G_copy
-
-def multi_ego_graph(G, n, radius:float=1, center:bool=True, undirected:bool=False, distance:str=None):
+def __multi_ego_graph(
+    G,
+    n,
+    radius: float = 1,
+    center: bool = True,
+    undirected: bool = False,
+    distance: str = "length",
+):
     """Returns induced subgraph of neighbors centered at node n within
     a given radius.
 
@@ -647,7 +971,7 @@ def multi_ego_graph(G, n, radius:float=1, center:bool=True, undirected:bool=Fals
     Node, edge, and graph attributes are copied to the returned subgraph.
     """
     if undirected:
-        if type(distance) is str:
+        if isinstance(distance, str):
             sp, _ = nx.multi_source_dijkstra(
                 G.to_undirected(), n, cutoff=radius, weight=distance
             )
@@ -658,256 +982,348 @@ def multi_ego_graph(G, n, radius:float=1, center:bool=True, undirected:bool=Fals
                 )
             )
     else:
-        if type(distance) is str:
+        if isinstance(distance, str):
             sp, _ = nx.multi_source_dijkstra(G, n, cutoff=radius, weight=distance)
         else:
             sp = dict(nx.multi_source_dijkstra_path_length(G, n, cutoff=radius))
 
     H = G.subgraph(sp).copy()
-    nx.set_node_attributes(H,sp,'dist_to_center')
+    nx.set_node_attributes(H, sp, "dist_to_center")
     if not center:
         H.remove_node(n)
 
     return H
 
-def isochrone_gdfs(G,n,radius:float,undirected:bool=False,distance:str='length',center:bool=True):
-    H = multi_ego_graph(G,n,radius=radius,undirected=undirected,distance=distance,center=center)
-    if len(H.edges) == 0:
-        nodes, edges = ox.graph_to_gdfs(G)
-        iso_edges = gpd.GeoDataFrame(columns=edges.columns, crs=edges.crs, geometry=[])
-        cols = list(nodes.columns) 
-        if 'dist_to_center' not in cols:
-            cols.append('dist_to_center')
 
-        iso_nodes = gpd.GeoDataFrame(columns=cols, crs=nodes.crs, geometry=[])
+def crop_graph_by_iso_nodes(
+    G=None,
+    node_ids=[],
+    border_node_ids=[],
+    min_edge_length: float = 0,
+    undirected: bool = False,
+    outbound: bool = True,
+    nodes_gdf=None,
+    edges_gdf=None,
+    graph_attrs=None,
+):
+    if G is None:
+        if (nodes_gdf is None) or (edges_gdf is None) or (graph_attrs is None):
+            raise Exception("Eather provide G or nodes_gdf, edges_gdf and graph_attrs")
     else:
-        iso_nodes, iso_edges = ox.graph_to_gdfs(H)
+        nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
+        graph_attrs = G.graph
 
-    return iso_nodes, iso_edges
+    if len(node_ids) == 0:
+        return nx.MultiDiGraph(attr=graph_attrs)
 
-def isochrone_exact_boundary_gdfs(nodes:gpd.GeoDataFrame,edges:gpd.GeoDataFrame,iso_nodes:gpd.GeoDataFrame,iso_edges:gpd.GeoDataFrame = None,
-                                    radius:float = -1,undirected:bool=False,min_node_id:int=None,min_dist:float=0,accessibility=None):
-    import shapely 
-    """dist_to_center is lost in iso_nodes"""
+    crs = graph_attrs["crs"]
 
-    if type(min_node_id) == type(None):
-        min_node_id = min(nodes.index)
+    nodes_gdf = nodes_gdf.loc[node_ids + border_node_ids]
 
-    if type(iso_edges) == type(None):
-        if undirected:
-            edges_help = edges.reset_index()
-            iso_edges = edges.loc[edges_help['u'].isin(iso_nodes.index) & edges_help['v'].isin(iso_nodes.index)]
+    edges_gdf = edges_gdf.reset_index()
+
+    if undirected:
+        edges_gdf = edges_gdf[
+            (edges_gdf["u"].isin(node_ids) & edges_gdf["v"].isin(node_ids))
+            | (edges_gdf["u"].isin(node_ids) & edges_gdf["v"].isin(border_node_ids))
+            | (edges_gdf["u"].isin(border_node_ids) & edges_gdf["v"].isin(node_ids))
+            | (
+                (
+                    edges_gdf["u"].isin(border_node_ids)
+                    & edges_gdf["v"].isin(border_node_ids)
+                )
+                & (edges_gdf["length"] < (2 * min_edge_length))
+            )
+        ]
+    elif outbound:
+        edges_gdf = edges_gdf[
+            (edges_gdf["u"].isin(node_ids) & edges_gdf["v"].isin(node_ids))
+            | (edges_gdf["u"].isin(node_ids) & edges_gdf["v"].isin(border_node_ids))
+            | (
+                (
+                    edges_gdf["u"].isin(border_node_ids)
+                    & edges_gdf["v"].isin(border_node_ids)
+                )
+                & (edges_gdf["length"] < (2 * min_edge_length))
+            )
+        ]
+    else:
+        edges_gdf = edges_gdf[
+            (edges_gdf["u"].isin(node_ids) & edges_gdf["v"].isin(node_ids))
+            | (edges_gdf["u"].isin(border_node_ids) & edges_gdf["v"].isin(node_ids))
+            | (
+                (
+                    edges_gdf["u"].isin(border_node_ids)
+                    & edges_gdf["v"].isin(border_node_ids)
+                )
+                & (edges_gdf["length"] < (2 * min_edge_length))
+            )
+        ]
+
+    edges_gdf = edges_gdf.set_index(["u", "v", "key"])
+
+    nodes_gdf = nodes_gdf.to_crs(crs)
+    edges_gdf = edges_gdf.to_crs(crs)
+
+    return ox.graph_from_gdfs(nodes_gdf, edges_gdf, graph_attrs=graph_attrs)
+
+
+def isochrone(
+    G,
+    nodes,
+    radius,
+    distance_column="length",
+    min_edge_length: float = 0.001,
+    undirected: bool = False,
+    exact: bool = True,
+    outbound: bool = True,
+    crop_graph: bool = True,
+):
+    H = __multi_ego_graph(
+        G, nodes, radius, center=True, undirected=undirected, distance=distance_column
+    )
+
+    nodes_iso_gdf = ox.graph_to_gdfs(H, edges=False)
+    node_ids = list(nodes_iso_gdf.index)
+    nodes_iso_gdf = nodes_iso_gdf.reset_index()
+
+    if not exact:
+        if crop_graph:
+            return H
         else:
-            raise Exception("For a directed graph the iso_edges keyword must be set.")
+            return G, node_ids
 
-    iso_nodes['border_dist'] = radius - iso_nodes['dist_to_center']
+    nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
 
-    edges_border = edges[edges['accessibility'] > accessibility].loc[list(edges[edges['accessibility'] > accessibility].reset_index()['u'].isin(iso_nodes.index))]
-    edges_border['border_dist_u'] = edges_border.index.get_level_values('u').map(iso_nodes['border_dist'])
-    edges_border['border_dist_v'] = edges_border.index.get_level_values('v').map(iso_nodes['border_dist'])
-    edges_border['border_dist'] = edges_border[['border_dist_u', 'border_dist_v']].max(axis=1, skipna=True)
-    edges_border = edges_border.loc[edges_border['border_dist'] > (min_dist+0.1)]
-    edges_border = edges_border.loc[edges_border['border_dist'] < edges_border.geometry.length]
-    edges_border['edge_id'] = list(edges_border.reset_index().apply(lambda x: str(np.sort([x['u'],x['v']])),axis=1))
-    sum_per_edge = edges_border.groupby('edge_id')['border_dist'].sum()
-    edges_border['total_border_len'] = edges_border['edge_id'].map(sum_per_edge)
-    edges_border = edges_border.loc[edges_border.geometry.length >= edges_border['total_border_len']]
-    border_points = edges_border.interpolate(edges_border['border_dist'])
-    nodes_border = nodes.loc[nodes.index.isin(
-            list(edges_border.reset_index()['u']) + list(edges_border.reset_index()['v'])
-        )]
+    edges_border_gdf = edges_gdf.reset_index().copy()
+    if undirected or outbound:
+        edges_border_gdf = edges_border_gdf.merge(
+            nodes_iso_gdf[["osmid", "dist_to_center"]].rename(
+                columns={"osmid": "u", "dist_to_center": "remaining_dist_u"}
+            ),
+            on="u",
+            how="left",
+        )
+        if outbound and (not undirected):
+            edges_border_gdf["remaining_dist_v"] = None
 
-    edges_border = pd.concat([
-            edges_border,
-            edges.loc[list(edges.reset_index()['u'].isin(edges_border.reset_index()['v']) & edges.reset_index()['v'].isin(edges_border.reset_index()['u']))] 
-            ])
+    if undirected or (not outbound):
+        edges_border_gdf = edges_border_gdf.merge(
+            nodes_iso_gdf[["osmid", "dist_to_center"]].rename(
+                columns={"osmid": "v", "dist_to_center": "remaining_dist_v"}
+            ),
+            on="v",
+            how="left",
+        )
+        if (not outbound) and (not undirected):
+            edges_border_gdf["remaining_dist_u"] = None
 
-    edges_border = edges_border[~edges_border.index.duplicated(keep='first')]
+    edges_border_gdf["remaining_dist_u"] = radius - edges_border_gdf["remaining_dist_u"]
+    edges_border_gdf["remaining_dist_v"] = radius - edges_border_gdf["remaining_dist_v"]
+    edges_border_gdf["remaining_dist_u"] = edges_border_gdf["remaining_dist_u"].fillna(
+        0
+    )
+    edges_border_gdf["remaining_dist_v"] = edges_border_gdf["remaining_dist_v"].fillna(
+        0
+    )
+    edges_border_gdf = edges_border_gdf[
+        (edges_border_gdf["remaining_dist_u"] > 0)
+        | (edges_border_gdf["remaining_dist_v"] > 0)
+    ]
+    edges_border_gdf = edges_border_gdf[
+        (edges_border_gdf["remaining_dist_u"] < edges_border_gdf["length"])
+        & (edges_border_gdf["remaining_dist_v"] < edges_border_gdf["length"])
+    ]
 
-    new_nodes_border, new_edges_border, _ = add_points_to_graph_gdfs(border_points,nodes_border,edges_border,
-                                                        min_node_id=min(nodes.index),max_dist=0.1,min_dist=min_dist,tolerance=0.1)
-    
-    nearest_indices = new_nodes_border.sindex.nearest(border_points.geometry, max_distance=min_dist+0.1)
-    node_ids = list(new_nodes_border.iloc[nearest_indices[1, :]].index)
-    
-    edges = pd.concat([
-        edges.loc[edges.index.isin(edges_border.index) == False],
-        new_edges_border
-    ])
+    edges_border_gdf = edges_border_gdf[
+        (
+            (edges_border_gdf["remaining_dist_u"] > 0)
+            & (edges_border_gdf["remaining_dist_v"] > 0)
+            & (
+                (
+                    edges_border_gdf["remaining_dist_u"]
+                    + edges_border_gdf["remaining_dist_v"]
+                )
+                < (edges_border_gdf["length"] - min_edge_length)
+            )
+        )
+        | (
+            (edges_border_gdf["remaining_dist_u"] == 0)
+            | (edges_border_gdf["remaining_dist_v"] == 0)
+        )
+    ]
 
-    nodes = pd.concat([
-        nodes.loc[nodes.index.isin(new_nodes_border.index) == False],
-        new_nodes_border
-    ])
+    border_node_ids = []
+    border_node_ids += list(
+        edges_border_gdf.loc[
+            (edges_border_gdf["remaining_dist_u"] <= min_edge_length)
+            & (edges_border_gdf["remaining_dist_u"] > 0),
+            "u",
+        ]
+    )
+    border_node_ids += list(
+        edges_border_gdf.loc[
+            (
+                (edges_border_gdf["length"] - edges_border_gdf["remaining_dist_u"])
+                <= min_edge_length
+            )
+            & (edges_border_gdf["remaining_dist_u"] > 0),
+            "v",
+        ]
+    )
+    border_node_ids += list(
+        edges_border_gdf.loc[
+            (edges_border_gdf["remaining_dist_v"] <= min_edge_length)
+            & (edges_border_gdf["remaining_dist_v"] > 0),
+            "v",
+        ]
+    )
+    border_node_ids += list(
+        edges_border_gdf.loc[
+            (
+                (edges_border_gdf["length"] - edges_border_gdf["remaining_dist_v"])
+                <= min_edge_length
+            )
+            & (edges_border_gdf["remaining_dist_v"] > 0),
+            "u",
+        ]
+    )
 
-    edges_help = new_edges_border.reset_index()
-    edges_border_out = new_edges_border.loc[list(
-                    edges_help['u'].isin(iso_nodes.index) & edges_help['v'].isin(node_ids)
-                )]
+    edges_border_gdf = edges_border_gdf[
+        (edges_border_gdf["remaining_dist_u"] > min_edge_length)
+        | (edges_border_gdf["remaining_dist_v"] > min_edge_length)
+    ]
+    edges_border_gdf = edges_border_gdf[
+        (
+            (edges_border_gdf["length"] - edges_border_gdf["remaining_dist_u"])
+            > min_edge_length
+        )
+        | (
+            (edges_border_gdf["length"] - edges_border_gdf["remaining_dist_v"])
+            > min_edge_length
+        )
+    ]
 
-    edges_border = pd.concat([edges_border_out,
-            new_edges_border.loc[list(
-                            edges_help['v'].isin(edges_border_out.reset_index()['u']) & edges_help['u'].isin(edges_border_out.reset_index()['v'])
-                        )]
-        ])
-    edges_border = edges_border[~edges_border.index.duplicated(keep='first')]
+    # Compute interpolation distance
+    edges_border_gdf["projected_dist_u"] = edges_border_gdf["remaining_dist_u"]
+    edges_border_gdf["projected_dist_v"] = (
+        edges_border_gdf["length"] - edges_border_gdf["remaining_dist_v"]
+    )
 
-    if undirected:
-        edges_border_out = edges_border
+    edges_border_gdf = edges_border_gdf.drop(
+        columns=[
+            "remaining_dist_u",
+            "remaining_dist_v",
+            "remaining_dist_u",
+            "remaining_dist_v",
+        ]
+    )
 
-    if len(iso_edges) > 0: 
-        iso_edges = edges.loc[list((edges.reset_index()['u'].isin(list(iso_edges.reset_index()['u'])) & edges.reset_index()['v'].isin(list(iso_edges.reset_index()['v']))) | 
-            (edges.reset_index()['v'].isin(list(iso_edges.reset_index()['u'])) & edges.reset_index()['u'].isin(list(iso_edges.reset_index()['v']))))]
+    edges_border_gdf = pd.melt(
+        edges_border_gdf,
+        id_vars=[
+            col
+            for col in edges_border_gdf.columns
+            if col not in ["projected_dist_u", "projected_dist_v"]
+        ],
+        value_vars=["projected_dist_u", "projected_dist_v"],
+        var_name="source",
+        value_name="projected_dist",
+    ).drop(columns=["source"])
 
-        iso_edges = pd.concat([
-            iso_edges,
-            edges.loc[edges.index.isin(edges_border.index)] 
-            ])
+    edges_border_gdf = edges_border_gdf[
+        (edges_border_gdf["projected_dist"] > min_edge_length)
+        & (
+            (edges_border_gdf["length"] - edges_border_gdf["projected_dist"])
+            > min_edge_length
+        )
+    ]
 
-        iso_edges = iso_edges[~iso_edges.index.duplicated(keep='first')]
-    else:
-        iso_edges = edges.loc[edges.index.isin(edges_border.index)]
+    edges_border_gdf["point"] = edges_border_gdf.interpolate(
+        edges_border_gdf["projected_dist"]
+    )
+    edges_border_gdf["length"] = edges_border_gdf["projected_dist"]
 
-    iso_nodes = nodes.loc[nodes.index.isin(iso_edges.reset_index()['u']) | nodes.index.isin(iso_edges.reset_index()['v'])]
-    iso_nodes = iso_nodes[~iso_nodes.index.duplicated(keep='first')]
-    
-    nodes = nodes.drop(columns=['total_border_len','border_dist','border_dist_u','border_dist_v','edge_id'],errors='ignore')
-    edges = edges.drop(columns=['total_border_len','border_dist','border_dist_u','border_dist_v','edge_id'],errors='ignore')
-    iso_nodes = iso_nodes.drop(columns=['total_border_len','border_dist','border_dist_u','border_dist_v','edge_id'],errors='ignore')
-    iso_edges = iso_edges.drop(columns=['total_border_len','border_dist','border_dist_u','border_dist_v','edge_id'],errors='ignore')
+    min_id = nodes_gdf.index.max() + 1
+    new_border_node_ids = list(min_id + np.arange(0, len(edges_border_gdf)))
+    edges_border_gdf["new_node_id"] = new_border_node_ids
+    border_node_ids += new_border_node_ids
 
-    return nodes, edges, iso_nodes, iso_edges
+    edges_border_gdf["u"] = edges_border_gdf["u"].astype(int)
+    edges_border_gdf["v"] = edges_border_gdf["v"].astype(int)
+    edges_border_gdf["key"] = edges_border_gdf["key"].astype(int)
+    edges_border_gdf = edges_border_gdf.set_index(["u", "v", "key"])
 
-def isochrone_exact_boundary_gdfs_border(nodes:gpd.GeoDataFrame,edges:gpd.GeoDataFrame,iso_nodes:gpd.GeoDataFrame,iso_edges:gpd.GeoDataFrame = None,
-                                    radius:float = -1,undirected:bool=False,min_node_id:int=None,min_dist:float=0,accessibility=None):
-    import shapely 
-    """dist_to_center is lost in iso_nodes"""
-
-    if type(min_node_id) == type(None):
-        min_node_id = min(nodes.index)
-
-    if type(iso_edges) == type(None):
-        if undirected:
-            edges_help = edges.reset_index()
-            iso_edges = edges.loc[edges_help['u'].isin(iso_nodes.index) & edges_help['v'].isin(iso_nodes.index)]
+    if len(edges_border_gdf) == 0:
+        if crop_graph:
+            return H
         else:
-            raise Exception("For a directed graph the iso_edges keyword must be set.")
+            return G, node_ids, []
 
-    edges_help = edges.reset_index()
-    edges_border_out = edges.loc[list(
-                    edges_help['u'].isin(iso_nodes.index
-                             ) & (
-                    edges_help['v'].isin(iso_nodes.index) == False)
-                )]
-    
-    if accessibility:
-        edges_border_out = edges_border_out.loc[edges_border_out['accessibility'] > accessibility]
+    nodes_gdf, edges_gdf = __split_at_edges(nodes_gdf, edges_gdf, edges_border_gdf)
+    if crop_graph:
+        nodes_gdf = nodes_gdf.loc[node_ids + border_node_ids]
+        if undirected:
+            edges_gdf = edges_gdf[
+                (
+                    (
+                        edges_gdf.reset_index()["u"].isin(node_ids)
+                        & edges_gdf.reset_index()["v"].isin(node_ids)
+                    )
+                    | (
+                        edges_gdf.reset_index()["u"].isin(node_ids)
+                        | edges_gdf.reset_index()["v"].isin(border_node_ids)
+                    )
+                    | (
+                        edges_gdf.reset_index()["u"].isin(border_node_ids)
+                        | edges_gdf.reset_index()["v"].isin(node_ids)
+                    )
+                )
+            ]
+        elif outbound:
+            edges_gdf = edges_gdf[
+                (
+                    (
+                        edges_gdf.reset_index()["u"].isin(node_ids)
+                        & edges_gdf.reset_index()["v"].isin(node_ids)
+                    )
+                    | (
+                        edges_gdf.reset_index()["u"].isin(node_ids)
+                        | edges_gdf.reset_index()["v"].isin(border_node_ids)
+                    )
+                )
+            ]
+        else:
+            edges_gdf = edges_gdf[
+                (
+                    (
+                        edges_gdf.reset_index()["u"].isin(node_ids)
+                        & edges_gdf.reset_index()["v"].isin(node_ids)
+                    )
+                    | (
+                        edges_gdf.reset_index()["u"].isin(border_node_ids)
+                        | edges_gdf.reset_index()["v"].isin(node_ids)
+                    )
+                )
+            ]
 
-    if (len(edges_border_out) == 0):
-        return nodes, edges, iso_nodes, iso_edges
+    border_node_ids = list(set(border_node_ids) - set(node_ids))
 
-    edges_border = pd.concat([edges_border_out,
-            edges.loc[list(edges_help['v'].isin(edges_border_out.reset_index()['u']) & edges_help['u'].isin(edges_border_out.reset_index()['v']))]
-        ])
-
-    if accessibility:
-        edges_border = edges_border.loc[edges_border['accessibility'] > accessibility]
-
-    edges_border = edges_border[~edges_border.index.duplicated(keep='first')]
-    
-    if undirected:
-        nodes_border = iso_nodes.loc[iso_nodes.index.isin(
-            list(edges_border.reset_index()['u']) + list(edges_border.reset_index()['v'])
-        )]
-        edges_border_out = edges_border
+    if crop_graph:
+        G = crop_graph_by_iso_nodes(
+            G=None,
+            node_ids=node_ids,
+            border_node_ids=border_node_ids,
+            min_edge_length=min_edge_length,
+            undirected=undirected,
+            outbound=outbound,
+            nodes_gdf=nodes_gdf,
+            edges_gdf=edges_gdf,
+            graph_attrs=G.graph,
+        )
+        return G
     else:
-        nodes_border = iso_nodes.loc[iso_nodes.index.isin(
-            list(edges_border_out.reset_index()['u'])
-        )]
-
-    edges_border_out['edge_id'] = list(edges_border_out.reset_index().apply(lambda x: str(np.sort([x['u'],x['v']])),axis=1))
-    nodes_border = nodes_border.loc[(radius - nodes_border['dist_to_center']) > 0]
-    nodes_border['border_dist'] = radius - nodes_border['dist_to_center']
-    edges_border_out = edges_border_out[list(edges_border_out.reset_index()['u'].isin(nodes_border.index))]
-    edges_border_out['projected_dist'] = edges_border_out.index.get_level_values('u').map(nodes_border['border_dist'])
-    sum_per_edge = edges_border_out.groupby('edge_id')['projected_dist'].sum()
-    edges_border_out['proj_len_total'] = edges_border_out['edge_id'].map(sum_per_edge)
-    edges_border_out = edges_border_out[edges_border_out.geometry.length >= edges_border_out['proj_len_total']]
-    #edges_border_out = edges_border_out.loc[edges_border_out.groupby("edge_id")["projected_dist"].idxmax()]
-    border_points = edges_border_out.interpolate(edges_border_out['projected_dist'])
-    nodes_edges_border = nodes.loc[nodes.index.isin(
-            list(edges_border.reset_index()['u']) + list(edges_border.reset_index()['v'])
-        )]
-    new_nodes_edges_border, new_edges_border, _ = add_points_to_graph_gdfs(border_points,nodes_edges_border,edges_border,
-                                                        min_node_id=min(nodes.index),max_dist=0.1,min_dist=min_dist,tolerance=0.1)
-    
-    nearest_indices = new_nodes_edges_border.sindex.nearest(border_points.geometry, max_distance=min_dist+0.1)
-    node_ids = list(new_nodes_edges_border.iloc[nearest_indices[1, :]].index)
-    
-    edges = pd.concat([
-        edges.loc[edges.index.isin(edges_border.index) == False],
-        new_edges_border
-    ])
-
-    nodes = pd.concat([
-        nodes.loc[nodes.index.isin(nodes_edges_border.index) == False],
-        new_nodes_edges_border
-    ])
-
-    edges_help = new_edges_border.reset_index()
-    edges_border_out = new_edges_border.loc[list(
-                    edges_help['u'].isin(iso_nodes.index) & edges_help['v'].isin(node_ids)
-                )]
-
-    edges_border = pd.concat([edges_border_out,
-            new_edges_border.loc[list(
-                            edges_help['v'].isin(edges_border_out.reset_index()['u']) & edges_help['u'].isin(edges_border_out.reset_index()['v'])
-                        )]
-        ])
-    edges_border = edges_border[~edges_border.index.duplicated(keep='first')]
-
-    if undirected:
-        edges_border_out = edges_border
-
-    if len(iso_edges) > 0: 
-        iso_edges = edges.loc[list((edges.reset_index()['u'].isin(list(iso_edges.reset_index()['u'])) & edges.reset_index()['v'].isin(list(iso_edges.reset_index()['v']))) | 
-            (edges.reset_index()['v'].isin(list(iso_edges.reset_index()['u'])) & edges.reset_index()['u'].isin(list(iso_edges.reset_index()['v']))))]
-
-        iso_edges = pd.concat([
-            iso_edges,
-            edges.loc[edges.index.isin(edges_border.index)] 
-            ])
-
-        iso_edges = iso_edges[~iso_nodes.index.duplicated(keep='first')]
-    else:
-        iso_edges = edges.loc[edges.index.isin(edges_border.index)]
-
-    iso_nodes = nodes.loc[nodes.index.isin(iso_edges.reset_index()['u']) | nodes.index.isin(iso_edges.reset_index()['v'])]
-
-    iso_nodes = iso_nodes[~iso_nodes.index.duplicated(keep='first')]
-
-    nodes = nodes.drop(columns=['total_border_len','border_dist','border_dist_u','border_dist_v','edge_id'],errors='ignore')
-    edges = edges.drop(columns=['total_border_len','border_dist','border_dist_u','border_dist_v','edge_id'],errors='ignore')
-    iso_nodes = iso_nodes.drop(columns=['total_border_len','border_dist','border_dist_u','border_dist_v','edge_id'],errors='ignore')
-    iso_edges = iso_edges.drop(columns=['total_border_len','border_dist','border_dist_u','border_dist_v','edge_id'],errors='ignore')
-    
-    return nodes, edges, iso_nodes, iso_edges
-    # dist_to_center is lost in iso_nodes
-
-def isochrone_graph(G,n=None,radius:float=None,undirected:bool=False,distance:str='length',min_dist:float=5):
-    iso_nodes, iso_edges = isochrone_gdfs(G=G,n=n,radius=radius,undirected=undirected,distance=distance)
-    nodes, edges = ox.graph_to_gdfs(G)
-    _,_,iso_nodes,iso_edges = isochrone_exact_boundary_gdfs(iso_nodes=iso_nodes,iso_edges=iso_edges,nodes=nodes,edges=edges, 
-                                                             radius=radius,undirected=undirected,min_dist=min_dist)
-    return ox.graph_from_gdfs(iso_nodes,iso_edges)
-
-
-def isochrone_to_polygon(G,max_segment_len:float=25,buffer:float=5,alpha:float=0.8,remove_small_objects:float=10,remove_small_holes:float=50):
-    from . import utils
-    geom = ox.graph_to_gdfs(G,nodes=False)
-    poly = utils.alpha_shape(geom,max_segment_len=max_segment_len,buffer=buffer,alpha=alpha)
-    poly = utils.remove_small_objects_and_holes(poly,remove_small_objects=remove_small_objects,remove_small_holes=remove_small_holes)
-    return poly
-
-def save_graph(path,G):
-    ox.io.save_graphml(G,path)
+        G = ox.graph_from_gdfs(
+            gdf_nodes=nodes_gdf, gdf_edges=edges_gdf, graph_attrs=G.graph
+        )
+        return G, node_ids, border_node_ids

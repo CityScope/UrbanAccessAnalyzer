@@ -1,139 +1,159 @@
-import geopandas as gpd
 import pandas as pd
+import geopandas as gpd
 import numpy as np
 import warnings
 
-def service_type(service_gdf:gpd.GeoDataFrame,row_values:list=None,columns:list=None):
+
+def condense_rows(
+    df: pd.DataFrame, row_values: list | None = None, columns: list | None = None
+):
     """
-    The first values of row_values and columns lists are give priority if on a row of the service dataframe there are more than one possible value.
-    If row_values and columns are given the order of columns does not matter.
+    Condense multiple columns of a dataframe into a single 'service_type' column.
+
+    If row_values and columns are provided, the first items in row_values are given priority.
+    If multiple values exist on a row, the highest-priority value (based on order in row_values) is selected.
+
+    Parameters:
+        df (pd.DataFrame): Input DataFrame (GeoDataFrame or regular).
+        row_values (list): Optional list of values in priority order.
+        columns (list): Optional list of columns to condense.
+
+    Returns:
+        List: A list of condensed 'service_type' values, same length as the input.
     """
-    new_service_gdf = service_gdf.copy()
+    df = df.copy()
 
-    if type(columns) == list: 
-        new_service_gdf = new_service_gdf[columns + ['geometry']]
-            
-    if type(row_values) == list:
-        new_service_gdf[new_service_gdf[list(new_service_gdf.columns.drop('geometry'))].isin(row_values)==False] = None
-        new_service_gdf['service_type'] = None#list(new_service_gdf[new_service_gdf.keys()[0]])
-        for i in reversed(row_values):
-            rows = np.sum(np.array(new_service_gdf == i),axis=1)
-            new_service_gdf.loc[rows == 1, 'service_type'] = i
-    else: 
-        new_service_gdf['service_type'] = None
-        for i in reversed(list(new_service_gdf.columns.drop(['geometry','service_type']))):
-            rows = new_service_gdf[i].isna() == False
-            new_service_gdf.loc[rows, 'service_type'] = new_service_gdf.loc[rows,i] 
+    # Determine relevant columns (excluding 'geometry' if exists)
+    data_columns = list(df.columns)
+    if "geometry" in data_columns:
+        data_columns.remove("geometry")
 
-
-    new_service_gdf = new_service_gdf[new_service_gdf['service_type'].isna() == False].reset_index(drop=True)
-    return new_service_gdf[['service_type','geometry']] 
-
-def merge_and_simplify_geometry(service_gdf:gpd.GeoDataFrame,buffer:float=5,min_width:float=10,simplify:float=1,min_area:float=0):
-    import shapely
-    from . import utils
-    new_service_gdf = service_gdf.copy()
-    orig_crs = service_gdf.crs
-    if orig_crs.is_projected == False:
-        new_service_gdf = new_service_gdf.to_crs(new_service_gdf.geometry.estimate_utm_crs())
-
-    if min_area > 0:
-        new_service_gdf = new_service_gdf[new_service_gdf.geometry.area > min_area]
-
-    if 'service_type' not in service_gdf.columns:
-        warnings.warn("Calling .service_type() before merging geometries as no service_type column was found.")
-        new_service_gdf = service_type(new_service_gdf)
-
-    if simplify > 0:
-        new_service_gdf.loc[:,'geometry'] = new_service_gdf.geometry.simplify(simplify)
-    
-    new_service_gdf['orig_area'] = new_service_gdf.geometry.area
-
-    geoms = new_service_gdf.geometry.union_all().buffer(buffer,resolution=4,cap_style='square',join_style='mitre')
-    geoms = geoms.buffer(-min_width-buffer,resolution=4,cap_style='square',join_style='mitre')
-    geoms = shapely.get_parts(geoms)
-
-    service_types = []
-    geometries = []
-    inter = utils.intersects_all_with_all(new_service_gdf.geometry.centroid,gpd.GeoSeries(geoms,crs=new_service_gdf.crs))
-    for i in range(len(geoms)):
-        inter_df = new_service_gdf.loc[inter[:,i],['orig_area','service_type']]
-        if len(inter_df) == 0:
-            continue
-
-        geometries.append(geoms[i])
-        st = list(inter_df.loc[inter_df['orig_area'] == max(inter_df['orig_area']), 'service_type'])[0]
-        service_types.append(st) ### What if there are two maximum areas? We take the first without taking row_values into account. 
-
-    new_service_gdf = gpd.GeoDataFrame({'service_type':service_types},geometry=geometries,crs=new_service_gdf.crs)
-    new_service_gdf.loc[:,'geometry'] = new_service_gdf.geometry.buffer(min_width,resolution=4,cap_style='square',join_style='mitre')
-    return new_service_gdf.to_crs(orig_crs)
-
-def by_row_values(service_gdf:gpd.GeoDataFrame,row_values:list,quality_values:list,columns:list = None,max_class:int=None):
-    if (len(row_values) != len(quality_values)):
-        raise Exception(f"Length of row_values is {len(row_values)} and quality_values {len(quality_values)} but they shpuld be equal.")
-    
-    
-    if min(quality_values) < 1:
-        raise Exception("The minimum accepted class_value (best class) should be 1")
-    
-    if 'service_type' not in service_gdf.columns: 
-        new_service_gdf = service_type(service_gdf,row_values=row_values,columns=columns)
+    if columns is not None:
+        columns = [col for col in columns if col in data_columns]
     else:
-        new_service_gdf = service_gdf.copy()
+        columns = data_columns
 
-    if 'service_quality' not in new_service_gdf.columns:
-        new_service_gdf['service_quality'] = 0
+    # Initialize output
+    service_type = [None] * len(df)
+
+    if row_values is not None:
+        # Priority-based assignment
+        for val in row_values:
+            mask = df[columns].eq(val).any(axis=1) & pd.isna(service_type)
+            for idx in df[mask].index:
+                matching_cols = df.loc[idx, columns] == val
+                if matching_cols.any():
+                    service_type[idx] = val
     else:
-        new_service_gdf.loc[new_service_gdf['service_quality'] == 0, 'service_quality'] = 999
-        new_service_gdf.loc[new_service_gdf['service_quality'] > 999, 'service_quality'] = 999
-        new_service_gdf.loc[new_service_gdf['service_quality'] < 999, 'service_quality'] -= 1   
+        # No priority, just take the first non-null value row-wise
+        for idx in df.index:
+            for col in columns:
+                val = df.at[idx, col]
+                if pd.notna(val):
+                    service_type[idx] = val
+                    break
 
-    for i in range(len(row_values)):
-        new_service_gdf.loc[new_service_gdf['service_type'] == row_values[i],'service_quality'] += quality_values[i]
-    
-    new_service_gdf.loc[new_service_gdf['service_type'].isin(row_values) == False,'service_quality'] = 999
-    new_service_gdf.loc[new_service_gdf['service_quality'] == 0, 'service_quality'] = 999
-    new_service_gdf = new_service_gdf[new_service_gdf['service_quality'] < 999]
+    return service_type
 
-    if max_class: 
-       new_service_gdf.loc[new_service_gdf['service_quality'] > max_class, 'service_quality'] = max_class     
-    
-    return new_service_gdf
 
-def by_area(service_gdf:gpd.GeoDataFrame,areas:list,max_class:int=None,ascending:bool=True):
-    new_service_gdf = service_gdf.copy()
-    orig_crs = service_gdf.crs
-    areas = np.sort(areas)
-    if 'service_quality' in new_service_gdf.columns:            
-        new_service_gdf.loc[new_service_gdf['service_quality'] == 0, 'service_quality'] = 999
-        new_service_gdf.loc[new_service_gdf['service_quality'] > 999, 'service_quality'] = 999
-        new_service_gdf.loc[new_service_gdf['service_quality'] < 999, 'service_quality'] -= 1   
+def by_values(values: list | pd.Series, value_priority: list):
+    # Convert values to list while preserving None/np.nan
+    values = pd.Series(values)
+    str_values = values.astype(str).where(~values.isna(), None)
+
+    if len(value_priority) == 0:
+        raise Exception("No values in value_priority")
+
+    if len(values) == 0:
+        return []
+
+    # Check for duplicates in priority list
+    if len(set(value_priority)) != len(value_priority):
+        raise Exception("value_priority has to have unique values")
+
+    # Check for None or NaN in priority list
+    if any(pd.isna(x) for x in value_priority):
+        raise Exception("value_priority has None or NaN")
+
+    # Convert priority list to strings for matching
+    value_priority_str = [str(x) for x in value_priority]
+
+    # Warn about mismatches
+    unique_values = set(str_values.dropna().unique())
+    not_in_values = set(value_priority_str) - unique_values
+    if not_in_values:
+        warnings.warn(
+            f"Values {not_in_values} in value_priority are not in the input values"
+        )
+
+    not_in_priority = unique_values - set(value_priority_str)
+    if not_in_priority:
+        warnings.warn(
+            f"Values {not_in_priority} in input values are not in value_priority. They will be set to None."
+        )
+
+    # Create mapping from value to priority index (starting at 1)
+    value_to_priority = {val: i + 1 for i, val in enumerate(value_priority_str)}
+
+    # Map values to priorities
+    result = str_values.map(value_to_priority)
+
+    return result.tolist()
+
+
+def by_area(gdf: gpd.GeoDataFrame | gpd.GeoSeries, area_steps: list):
+    """
+    Classify geometries by area thresholds defined in area_steps.
+
+    Parameters:
+        gdf (GeoDataFrame or GeoSeries): Input geometries.
+        area_steps (list): List of area breakpoints. Must be sorted (asc or desc).
+
+    Returns:
+        list: A list of class numbers corresponding to area bins.
+    """
+    if len(area_steps) == 0:
+        raise Exception("No values in area_steps")
+
+    if len(gdf) == 0:
+        return []
+
+    # Convert to GeoSeries if needed
+    if isinstance(gdf, gpd.GeoDataFrame):
+        gdf = gdf.copy()
     else:
-        new_service_gdf['service_quality'] = 0
+        gdf = gpd.GeoDataFrame({}, geometry=gdf.copy(), crs=gdf.crs)
 
-    if orig_crs.is_projected == False:
-        new_service_gdf = new_service_gdf.to_crs(new_service_gdf.geometry.estimate_utm_crs())
+    # Project if not projected
+    if not gdf.crs.is_projected:
+        gdf = gdf.to_crs(gdf.estimate_utm_crs())
 
-    new_service_gdf = new_service_gdf[new_service_gdf.geometry.area > min(areas)]
+    # Check sort order
+    ascending = area_steps == sorted(area_steps)
+    descending = area_steps == sorted(area_steps, reverse=True)
 
-    new_service_gdf['service_quality_temp'] = 999
+    if not ascending and not descending:
+        warnings.warn("area_steps is not sorted.")
 
-    for i in range(len(areas)):
-        if ascending:
-            _class = len(areas) - i
-        else:
-            _class = i 
+    # Build class labels
+    if descending:
+        classes = np.arange(len(area_steps), 0, -1)
+    else:
+        classes = np.arange(1, len(area_steps) + 1)
 
-        new_service_gdf.loc[new_service_gdf.geometry.area > areas[i],'service_quality_temp'] = _class
+    gdf["class"] = None
 
-    new_service_gdf['service_quality'] += new_service_gdf['service_quality_temp']
+    areas = gdf.area
 
-    new_service_gdf = new_service_gdf.drop(columns=['service_quality_temp'])
-    new_service_gdf.loc[new_service_gdf['service_quality'] == 0, 'service_quality'] = 999
-    new_service_gdf = new_service_gdf[new_service_gdf['service_quality'] < 999]
+    # Assign lowest class
+    gdf.loc[areas < area_steps[0], "class"] = classes[0]
 
-    if max_class: 
-       new_service_gdf.loc[new_service_gdf['service_quality'] > max_class, 'service_quality'] = max_class  
+    # Assign highest class
+    gdf.loc[areas >= area_steps[-1], "class"] = classes[-1]
 
-    return new_service_gdf.to_crs(orig_crs)
+    # Assign intermediate classes
+    for i in range(len(area_steps) - 1):
+        mask = (areas >= area_steps[i]) & (areas < area_steps[i + 1])
+        gdf.loc[mask, "class"] = classes[i + 1]
+
+    return gdf["class"].tolist()

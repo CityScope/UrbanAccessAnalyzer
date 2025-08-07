@@ -1,0 +1,23 @@
+[project]
+name = "UrbanAccessAnalyzer"
+version = "0.1.0"
+description = "Use graphs and OSM data to compute isochrones and accessibility to services"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "geopandas>=1.1.1",
+    "networkx>=3.5",
+    "numpy>=2.3.2",
+    "osm2geojson>=0.2.6",
+    "osmnx>=2.0.5",
+    "polars>=1.32.0",
+    "pyarrow>=21.0.0",
+    "pyrosm>=0.6.2",
+    "rapidfuzz>=3.13.0",
+    "shapely>=2.1.1",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.2.0",
+]
