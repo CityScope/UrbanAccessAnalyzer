@@ -1,2 +1,22 @@
-*.pyc
-*.ipynb
+# Sphinx build output
+docs/_build/
+_build/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+
+# Documentation build files
+docs/build/
+
+# Python egg files
+*.egg-info
+dist/
+build/
+
+examples/

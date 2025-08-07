@@ -7,7 +7,7 @@ import pandas as pd
 import osmnx as ox
 from osm2geojson import json2geojson
 
-import utils
+from . import utils
 
 
 def _write_poly_file(aoi: gpd.GeoDataFrame | gpd.GeoSeries, poly_path: str):
@@ -58,7 +58,9 @@ def _write_poly_file(aoi: gpd.GeoDataFrame | gpd.GeoSeries, poly_path: str):
         f.write("END\n")  # Final END for the entire polygon definition
 
 
-def download_geofabrik(aoi: gpd.GeoDataFrame | gpd.GeoSeries, output_folder: str):
+def download_geofabrik(
+    aoi: gpd.GeoDataFrame | gpd.GeoSeries, output_folder: str = None
+):
     """
     Finds the smallest Geofabrik region that contains the AOI and downloads the PBF file.
 
@@ -73,6 +75,8 @@ def download_geofabrik(aoi: gpd.GeoDataFrame | gpd.GeoSeries, output_folder: str
 
     aoi = aoi.to_crs(4326)
     aoi_geom = aoi.union_all()
+    if not aoi_geom.is_valid:
+        print("Validity problem:", shapely.validation.explain_validity(aoi_geom))
 
     # Load Geofabrik regions metadata from the current index file
     url = "https://download.geofabrik.de/index-v1.json"
@@ -120,7 +124,12 @@ def download_geofabrik(aoi: gpd.GeoDataFrame | gpd.GeoSeries, output_folder: str
     # Prepare output filename & path
     safe_name = utils.sanitize_filename(best_region.get("name", "region"))
     filename = f"{safe_name}.osm.pbf"
-    output_file = os.path.join(output_folder, filename)
+
+    if output_folder is not None:
+        os.makedirs(output_folder, exist_ok=True)
+        output_file = os.path.join(output_folder, filename)
+    else:
+        output_file = filename
 
     if os.path.exists(output_file):
         print(f"File '{output_file}' already exists. Skipping download.")
@@ -130,7 +139,6 @@ def download_geofabrik(aoi: gpd.GeoDataFrame | gpd.GeoSeries, output_folder: str
     pbf_response = requests.get(pbf_url, stream=True)
     pbf_response.raise_for_status()
 
-    os.makedirs(output_folder, exist_ok=True)
     with open(output_file, "wb") as f:
         for chunk in pbf_response.iter_content(chunk_size=8192):
             f.write(chunk)
@@ -288,7 +296,7 @@ def geofabrik_to_osm(
         print(
             f"File {input_file} does not exist. Downloading best matching geofabrik file."
         )
-        input_file = download_geofabrik(aoi, input_path if aoi is not None else ".")
+        input_file = download_geofabrik(aoi, input_path)
 
     current_file = input_file
     tag_filter_temp_file_path = None

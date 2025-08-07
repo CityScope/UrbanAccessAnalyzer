@@ -195,16 +195,18 @@ def __connected_node_groups(nodes_pl, edges_pl, max_dist: float | None = None):
             .group_by("osmid_group")
             .agg(pl.col("x"), pl.col("y"), pl.col("osmid"))
             .with_columns(
-                (
-                    pl.when(pl.col("x").len() > 2)
-                    .then(
-                        pl.struct(["x", "y"]).map_elements(
-                            lambda row: cluster(row["x"], row["y"], max_dist),
-                            return_dtype=list[int],
-                        )
-                    )
-                    .otherwise([0, 0])
-                ).alias("cluster_id")
+                pl.struct(["x", "y"])
+                .map_elements(
+                    lambda row: (
+                        [0]
+                        if len(row["x"]) == 1
+                        else [0, 0]
+                        if len(row["x"]) == 2
+                        else cluster(row["x"], row["y"], max_dist)
+                    ),
+                    return_dtype=list[int],
+                )
+                .alias("cluster_id")
             )
             .explode(["osmid", "x", "y", "cluster_id"])
             .group_by("osmid_group", "cluster_id")
@@ -227,7 +229,7 @@ def __remove_small_edges(nodes_pl, edges_pl, min_edge_length, crs):
     )
 
     delete_edges = __connected_node_groups(
-        nodes_pl, delete_edges, max_dist=min_edge_length * 1.5
+        nodes_pl, delete_edges, max_dist=min_edge_length * 2
     )
 
     edges_pl = (
@@ -628,7 +630,8 @@ def nearest_edges(
 def __polars_linestring_to_points(df, id_col=["u", "v", "key"], length: bool = False):
     df = df.lazy()
     df = (
-        df.with_columns(
+        df.unique(id_col)
+        .with_columns(
             [
                 # Remove 'LINESTRING(' and ')' and split into point strings
                 pl.col("geometry")
@@ -683,7 +686,13 @@ def __split_at_edges(nodes_gdf, edges_gdf, new_edges_gdf):
     edges_gdf = edges_gdf[~edges_gdf.index.isin(list(new_edges_gdf.index))]
 
     new_edges_gdf = new_edges_gdf.reset_index()
-    new_edges_gdf["edge_index"] = new_edges_gdf.index
+    new_edges_gdf["edge_index"] = (
+        new_edges_gdf["u"].astype(str)
+        + "_"
+        + new_edges_gdf["v"].astype(str)
+        + "_"
+        + new_edges_gdf["key"].astype(str)
+    )
 
     with warnings.catch_warnings():
         warnings.filterwarnings(
@@ -827,7 +836,7 @@ def __split_at_edges(nodes_gdf, edges_gdf, new_edges_gdf):
 
     edges_gdf = pd.concat([new_edges_gdf, edges_gdf])
 
-    nodes_gdf = pd.concat([nodes_gdf, new_nodes_gdf.drop_duplicates()])
+    nodes_gdf = pd.concat([nodes_gdf, new_nodes_gdf])
 
     return nodes_gdf, edges_gdf
 
@@ -851,7 +860,13 @@ def add_points_to_graph(
     nearest_indices = edges_gdf.sindex.nearest(points.geometry, max_distance=max_dist)
     new_edges_gdf = edges_gdf.iloc[nearest_indices[1, :]]
     new_edges_gdf = new_edges_gdf.reset_index()
-    new_edges_gdf["edge_index"] = new_edges_gdf.index
+    new_edges_gdf["edge_index"] = (
+        new_edges_gdf["u"].astype(str)
+        + "_"
+        + new_edges_gdf["v"].astype(str)
+        + "_"
+        + new_edges_gdf["key"].astype(str)
+    )
     points = points.iloc[nearest_indices[0, :]]
 
     new_edges_gdf["projected_dist"] = new_edges_gdf.project(
@@ -884,10 +899,10 @@ def add_points_to_graph(
                 "Some of the ids in points column 'id' are in nodes 'osmid'. Using default ids."
             )
             min_id = nodes_gdf.index.max() + 1
-            new_edges_gdf["new_node_id"] = min_id + points.index
+            new_edges_gdf["new_node_id"] = min_id + np.arange(0, len(new_edges_gdf))
     else:
         min_id = nodes_gdf.index.max() + 1
-        new_edges_gdf["new_node_id"] = min_id + points.index
+        new_edges_gdf["new_node_id"] = min_id + np.arange(0, len(new_edges_gdf))
 
     new_edges_gdf["point_edge_id"] = round(
         new_edges_gdf["projected_dist"] / min_edge_length

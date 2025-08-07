@@ -4,17 +4,22 @@ import os
 from rapidfuzz import process, fuzz
 
 
-def get_folder(path: str) -> str:
+def get_folder(path: str) -> str | None:
     """
-    If the path looks like a file (has an extension), return its parent directory.
-    Otherwise, assume it's a folder and return it as-is.
+    Returns the directory for a given path.
+    - If path is a file (has an extension), returns its parent folder.
+    - If path is a folder, returns the normalized folder path.
+    - If path is just a filename (e.g. "file.txt"), returns None.
     """
-    # Normalize path
     path = os.path.normpath(path)
-    # Check if it has a file extension
+    path = os.path.abspath(path)
+
+    # Check if it's a file (has extension)
     if os.path.splitext(path)[1]:
-        return os.path.dirname(path)
-    return path
+        folder = os.path.dirname(path)
+        return folder if folder else None
+    else:
+        return path
 
 
 def normalize_text(text):
