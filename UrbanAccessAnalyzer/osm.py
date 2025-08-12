@@ -218,7 +218,9 @@ def osmium_network_filter(network_type: str) -> dict[str, set[str] | None]:
     #     "pedestrian",
     #     "steps",
     # }
-    secondary_highways = {
+    primary_highways = {
+        "primary",
+        "primary_link",
         "secondary",
         "secondary_link",
         "tertiary",
@@ -263,10 +265,10 @@ def osmium_network_filter(network_type: str) -> dict[str, set[str] | None]:
             "foot": {"yes"},
             "bicycle": {"yes"},
         }
-    elif network_type == "walk+bike+secondary":
+    elif network_type == "walk+bike+primary":
         # combine walk+bike highways, plus foot=yes or bicycle=yes, exclude drive highways
         combined = walk_highways.union(bike_highways)
-        combined = combined.union(secondary_highways)
+        combined = combined.union(primary_highways)
         tag_filters = {
             "highway": combined,
             "foot": {"yes"},

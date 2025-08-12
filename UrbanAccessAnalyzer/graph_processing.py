@@ -531,11 +531,11 @@ def simplify_graph(
         nodes_gdf, edges_gdf = __remove_small_edges(
             nodes_pl, edges_pl, min_edge_length=min_edge_length, crs=crs
         )
-        G = ox.graph_from_gdfs(
+        new_G = ox.graph_from_gdfs(
             gdf_nodes=nodes_gdf, gdf_edges=edges_gdf, graph_attrs=graph_attrs
         )
-        G = simplify_graph(
-            G,
+        new_G = simplify_graph(
+            new_G,
             min_edge_length=0,
             min_edge_separation=min_edge_separation,
             loops=loops,
@@ -571,13 +571,13 @@ def simplify_graph(
 
             edges_gdf = __remove_near_edges(edges_gdf, max_dist=min_edge_separation)
 
-            G = ox.graph_from_gdfs(
+            new_G = ox.graph_from_gdfs(
                 gdf_nodes=nodes_gdf, gdf_edges=edges_gdf, graph_attrs=graph_attrs
             )
         else:
-            G = polars_to_graph(nodes_pl, edges_pl, crs, graph_attrs)
+            new_G = polars_to_graph(nodes_pl, edges_pl, crs, graph_attrs)
 
-    return G
+    return new_G
 
 
 def nodes_to_points(nodes, G):
@@ -599,31 +599,41 @@ def nodes_to_points(nodes, G):
 def nearest_nodes(
     geometries: gpd.GeoDataFrame | gpd.GeoSeries, G, max_dist: float | None = None
 ):
+    # Get nodes as GeoDataFrame
     nodes = ox.graph_to_gdfs(G, edges=False)
+
+    # Ensure same CRS
     geom = geometries.to_crs(nodes.crs).copy()
 
+    # Create column to store results
+    geom["node_id"] = None
+
     # Find nearest nodes
-    indices = nodes.sindex.nearest(
+    idx_geom, idx_nodes = nodes.sindex.nearest(
         geom.geometry, max_distance=max_dist, return_all=False
     )
-    # Create a DataFrame to store nearest node results
-    geom["index"] = list(geom.index)
-    geom = geom.reset_index(drop=True)
-    geom.loc[indices[0], "node_id"] = nodes.iloc[indices[1]].index
-    geom = geom.drop_duplicates("index").reset_index(drop=True)
-    return list(geom["node_id"].astype(int))
+
+    # Assign results using positional index
+    geom.iloc[idx_geom, geom.columns.get_loc("node_id")] = list(
+        nodes.index[idx_nodes].astype(int)
+    )
+
+    # Return as list (None where no match)
+    return list(geom["node_id"])
 
 
 def nearest_edges(
     geometries: gpd.GeoDataFrame | gpd.GeoSeries, G, max_dist: float | None = None
 ):
     edges = ox.graph_to_gdfs(G, nodes=False)
-    geom = geometries.geometry.to_crs(edges.crs)
-    indices = edges.sindex.nearest(geom, max_distance=max_dist)
-    geom["index"] = list(geom.index)
-    geom = geom.reset_index(drop=True)
-    geom.loc[indices[0], "edge_id"] = edges.iloc[indices[1]].index
-    geom = geom.drop_duplicates("index").reset_index(drop=True)
+    geom = geometries.geometry.to_crs(edges.crs).copy()
+    geom["edge_id"] = None
+    idx_geom, idx_edges = edges.sindex.nearest(
+        geom, max_distance=max_dist, return_all=False
+    )
+    geom.iloc[idx_geom, geom.columns.get_loc("edge_id")] = list(
+        edges.index[idx_edges].astype(int)
+    )
     return list(geom["edge_id"])
 
 
@@ -851,6 +861,7 @@ def add_points_to_graph(
         return G, []
 
     graph_attrs = G.graph
+    points_orig = points.copy()
     points = points.to_crs(G.graph["crs"]).copy()
 
     nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
@@ -887,10 +898,12 @@ def add_points_to_graph(
 
     if len(new_edges_gdf) == 0:
         if max_dist is None:
-            return G, nearest_nodes(points, G)  # This is not the most efficient way
+            return G, nearest_nodes(
+                points_orig, G
+            )  # This is not the most efficient way
         else:
             return G, nearest_nodes(
-                points, G, max_dist=min_edge_length + max_dist + 0.01
+                points_orig, G, max_dist=min_edge_length + max_dist + 0.01
             )  # This is not the most efficient way
 
     if ("id" in points.columns) and (points["id"].dtype == int):
@@ -931,15 +944,17 @@ def add_points_to_graph(
 
     nodes_gdf, edges_gdf = __split_at_edges(nodes_gdf, edges_gdf, new_edges_gdf)
 
-    G = ox.graph_from_gdfs(
+    new_G = ox.graph_from_gdfs(
         gdf_nodes=nodes_gdf, gdf_edges=edges_gdf, graph_attrs=graph_attrs
     )
 
     if max_dist is None:
-        return G, nearest_nodes(points, G)  # This is not the most efficient way
+        return new_G, nearest_nodes(
+            points_orig, new_G
+        )  # This is not the most efficient way
     else:
-        return G, nearest_nodes(
-            points, G, max_dist=min_edge_length + max_dist + 0.01
+        return new_G, nearest_nodes(
+            points_orig, G=new_G, max_dist=min_edge_length + max_dist + 0.01
         )  # This is not the most efficient way
 
 
@@ -1083,33 +1098,11 @@ def crop_graph_by_iso_nodes(
     return ox.graph_from_gdfs(nodes_gdf, edges_gdf, graph_attrs=graph_attrs)
 
 
-def isochrone(
-    G,
-    nodes,
-    radius,
-    distance_column="length",
-    min_edge_length: float = 0.001,
-    undirected: bool = False,
-    exact: bool = True,
-    outbound: bool = True,
-    crop_graph: bool = True,
+def __exact_isochrone_gdfs(
+    nodes_gdf, edges_gdf, nodes_iso_gdf, radius, undirected, outbound, min_edge_length
 ):
-    H = __multi_ego_graph(
-        G, nodes, radius, center=True, undirected=undirected, distance=distance_column
-    )
-
-    nodes_iso_gdf = ox.graph_to_gdfs(H, edges=False)
     node_ids = list(nodes_iso_gdf.index)
     nodes_iso_gdf = nodes_iso_gdf.reset_index()
-
-    if not exact:
-        if crop_graph:
-            return H
-        else:
-            return G, node_ids
-
-    nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
-
     edges_border_gdf = edges_gdf.reset_index().copy()
     if undirected or outbound:
         edges_border_gdf = edges_border_gdf.merge(
@@ -1270,12 +1263,88 @@ def isochrone(
     edges_border_gdf = edges_border_gdf.set_index(["u", "v", "key"])
 
     if len(edges_border_gdf) == 0:
+        return nodes_gdf, edges_gdf, node_ids, []
+
+    nodes_gdf, edges_gdf = __split_at_edges(nodes_gdf, edges_gdf, edges_border_gdf)
+
+    border_node_ids = list(set(border_node_ids) - set(node_ids))
+
+    return nodes_gdf, edges_gdf, node_ids, border_node_ids
+
+
+def isochrone(
+    G,
+    nodes,
+    radius,
+    distance_column="length",
+    min_edge_length: float = 0.001,
+    undirected: bool = False,
+    exact: bool = True,
+    outbound: bool = True,
+    crop_graph: bool = True,
+):
+    if len(nodes) == 0:
+        if crop_graph:
+            return nx.MultiDiGraph()
+        elif exact:
+            return G, [], []
+        else:
+            return G, []
+
+    H = __multi_ego_graph(
+        G, nodes, radius, center=True, undirected=undirected, distance=distance_column
+    )
+
+    if not exact:
+        if crop_graph:
+            return H
+        else:
+            nodes_iso_gdf = ox.graph_to_gdfs(H, edges=False)
+            node_ids = list(nodes_iso_gdf.index)
+            return G, node_ids
+
+    nodes_iso_gdf = ox.graph_to_gdfs(H, edges=False)
+    node_ids = list(nodes_iso_gdf.index)
+
+    nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
+
+    nodes_gdf, edges_gdf, node_ids, border_node_ids = __exact_isochrone_gdfs(
+        nodes_gdf,
+        edges_gdf,
+        nodes_iso_gdf,
+        radius=radius,
+        undirected=undirected,
+        outbound=outbound,
+        min_edge_length=min_edge_length,
+    )
+
+    if len(border_node_ids) == 0:
         if crop_graph:
             return H
         else:
             return G, node_ids, []
 
-    nodes_gdf, edges_gdf = __split_at_edges(nodes_gdf, edges_gdf, edges_border_gdf)
+    if crop_graph:
+        G = crop_graph_by_iso_nodes(
+            G=None,
+            node_ids=node_ids,
+            border_node_ids=border_node_ids,
+            min_edge_length=min_edge_length,
+            undirected=undirected,
+            outbound=outbound,
+            nodes_gdf=nodes_gdf,
+            edges_gdf=edges_gdf,
+            graph_attrs=G.graph,
+        )
+        return G
+    else:
+        G = ox.graph_from_gdfs(
+            gdf_nodes=nodes_gdf, gdf_edges=edges_gdf, graph_attrs=G.graph
+        )
+        return G, node_ids, border_node_ids
+
+
+"""
     if crop_graph:
         nodes_gdf = nodes_gdf.loc[node_ids + border_node_ids]
         if undirected:
@@ -1321,24 +1390,17 @@ def isochrone(
                     )
                 )
             ]
+"""
 
-    border_node_ids = list(set(border_node_ids) - set(node_ids))
 
-    if crop_graph:
-        G = crop_graph_by_iso_nodes(
-            G=None,
-            node_ids=node_ids,
-            border_node_ids=border_node_ids,
-            min_edge_length=min_edge_length,
-            undirected=undirected,
-            outbound=outbound,
-            nodes_gdf=nodes_gdf,
-            edges_gdf=edges_gdf,
-            graph_attrs=G.graph,
-        )
-        return G
-    else:
-        G = ox.graph_from_gdfs(
-            gdf_nodes=nodes_gdf, gdf_edges=edges_gdf, graph_attrs=G.graph
-        )
-        return G, node_ids, border_node_ids
+# def __lsmatrix_to_list(lsmatrix,level_of_services):
+#     columns = lsmatrix.columns
+
+#     # Melt the dataframe to long format for easier processing
+#     melted = lsmatrix.melt(id_vars=columns[0], var_name='distance', value_name='ls')
+
+#     # For each stop_quality and value, find the max distance
+#     result = melted.groupby(['stop_quality', 'ls'])['distance'].max().reset_index()
+#     result['ls_id'] = result['ls'].replace({level_of_services[i] : str(i) for i in range(len(level_of_services))})
+#     result = result.sort_values(['ls_id','stop_quality'])
+#     return result
