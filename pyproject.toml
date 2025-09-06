@@ -24,13 +24,11 @@ dependencies = [
 dev = [
     "pre-commit>=4.2.0",
 ]
-[tool.setuptools]
-# This tells setuptools to map the root of the *Python package*
-# to the 'UrbanAccessAnalyzer' subdirectory within the repository root.
-package-dir = {"" = "UrbanAccessAnalyzer"}
-# This tells setuptools to automatically find all packages (including subpackages)
-# starting from the directory specified by package-dir.
-# So, it will find 'UrbanAccessAnalyzer' itself, and then any
-# 'UrbanAccessAnalyzer.subpackage', 'UrbanAccessAnalyzer.another_subpackage', etc.
-packages = ["UrbanAccessAnalyzer"]
 
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "UrbanAccessAnalyzer"}
+packages = ["UrbanAccessAnalyzer"]
