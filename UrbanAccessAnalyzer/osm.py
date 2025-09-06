@@ -219,6 +219,8 @@ def osmium_network_filter(network_type: str) -> dict[str, set[str] | None]:
     #     "steps",
     # }
     primary_highways = {
+        "trunk",
+        "trunk_link",
         "primary",
         "primary_link",
         "secondary",

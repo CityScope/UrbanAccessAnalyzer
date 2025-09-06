@@ -12,25 +12,6 @@ import warnings
 "TODO: Compute length in polars"
 "TODO: node elevations does not work"
 
-NODE_COLS = ["highway"]
-EDGE_COLS = [
-    "osmid",
-    "highway",
-    "oneway",
-    "reversed",
-    "name",
-    "maxspeed",
-    "bridge",
-    "lanes",
-    "ref",
-    "junction",
-    "access",
-    "width",
-    "service",
-    "tunnel",
-    "area",
-]
-
 
 def add_node_elevations_open_api(G):
     orig_template = ox.settings.elevation_url_template
@@ -47,8 +28,10 @@ def add_node_elevations_open_api(G):
 
 def graph_to_polars(G):
     nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
-    nodes_gdf[NODE_COLS] = nodes_gdf[NODE_COLS].astype(str)
-    edges_gdf[EDGE_COLS] = edges_gdf[EDGE_COLS].astype(str)
+    node_cols = list(set(nodes_gdf.columns) - {"geometry", "x", "y"})
+    edge_cols = list(set(edges_gdf.columns) - {"geometry", "length"})
+    nodes_gdf[node_cols] = nodes_gdf[node_cols].astype(str)
+    edges_gdf[edge_cols] = edges_gdf[edge_cols].astype(str)
 
     with warnings.catch_warnings():
         warnings.filterwarnings(
@@ -58,13 +41,13 @@ def graph_to_polars(G):
         )
 
         edges = edges_gdf.reset_index()[
-            ["u", "v", "key"] + EDGE_COLS + ["length", "geometry"]
+            ["u", "v", "key"] + edge_cols + ["length", "geometry"]
         ]
         edges["geometry"] = edges["geometry"].to_wkt()
         edges["geometry"] = edges["geometry"].astype(str)
         edges_pl = pl.from_pandas(edges)
 
-        nodes = nodes_gdf.reset_index()[["osmid", "x", "y"] + NODE_COLS + ["geometry"]]
+        nodes = nodes_gdf.reset_index()[["osmid", "x", "y"] + node_cols + ["geometry"]]
         nodes["geometry"] = nodes["geometry"].to_wkt()
         nodes["geometry"] = nodes["geometry"].astype(str)
         nodes_pl = pl.from_pandas(nodes)
@@ -72,12 +55,7 @@ def graph_to_polars(G):
 
 
 def polars_to_graph(nodes_pl, edges_pl, crs, graph_attrs, compute_length: bool = False):
-    if compute_length:
-        edges_gdf = edges_pl.to_pandas()[["u", "v", "key"] + EDGE_COLS + ["geometry"]]
-    else:
-        edges_gdf = edges_pl.to_pandas()[
-            ["u", "v", "key"] + EDGE_COLS + ["length", "geometry"]
-        ]
+    edges_gdf = edges_pl.to_pandas()
 
     edges_gdf["u"] = edges_gdf["u"].astype(int)
     edges_gdf["v"] = edges_gdf["v"].astype(int)
@@ -89,7 +67,7 @@ def polars_to_graph(nodes_pl, edges_pl, crs, graph_attrs, compute_length: bool =
     if compute_length:
         edges_gdf["length"] = edges_gdf.geometry.length
 
-    nodes_gdf = nodes_pl.to_pandas()[["osmid", "x", "y"] + NODE_COLS + ["geometry"]]
+    nodes_gdf = nodes_pl.to_pandas()
     nodes_gdf["osmid"] = nodes_gdf["osmid"].astype(int)
     nodes_gdf = gpd.GeoDataFrame(
         nodes_gdf, geometry=gpd.points_from_xy(nodes_gdf["x"], nodes_gdf["y"]), crs=crs
@@ -378,10 +356,9 @@ def __remove_small_edges(nodes_pl, edges_pl, min_edge_length, crs):
     df_with_group["key"] = 0
     edges_gdf = pd.concat([df_with_group, df_without_group], ignore_index=True)
 
-    edges_gdf = edges_gdf[["u", "v", "key"] + EDGE_COLS + ["length", "geometry"]]
     edges_gdf = edges_gdf.set_index(["u", "v", "key"])
 
-    nodes_gdf = nodes_pl.to_pandas()[["osmid", "x", "y"] + NODE_COLS + ["geometry"]]
+    nodes_gdf = nodes_pl.to_pandas()
     nodes_gdf["osmid"] = nodes_gdf["osmid"].astype(int)
     nodes_gdf = gpd.GeoDataFrame(
         nodes_gdf, geometry=gpd.points_from_xy(nodes_gdf["x"], nodes_gdf["y"]), crs=crs
@@ -553,14 +530,9 @@ def simplify_graph(
                 geometry=gpd.GeoSeries.from_wkt(edges_gdf["geometry"]),
                 crs=crs,
             )
-            edges_gdf = edges_gdf[
-                ["u", "v", "key"] + EDGE_COLS + ["length", "geometry"]
-            ]
             edges_gdf = edges_gdf.set_index(["u", "v", "key"])
 
-            nodes_gdf = nodes_pl.to_pandas()[
-                ["osmid", "x", "y"] + NODE_COLS + ["geometry"]
-            ]
+            nodes_gdf = nodes_pl.to_pandas()
             nodes_gdf["osmid"] = nodes_gdf["osmid"].astype(int)
             nodes_gdf = gpd.GeoDataFrame(
                 nodes_gdf,
@@ -693,6 +665,8 @@ def __polars_linestring_to_points(df, id_col=["u", "v", "key"], length: bool = F
 
 
 def __split_at_edges(nodes_gdf, edges_gdf, new_edges_gdf):
+    node_cols = list(set(nodes_gdf.columns) - {"geometry", "x", "y"})
+    edge_cols = list(set(edges_gdf.columns) - {"geometry", "length"})
     edges_gdf = edges_gdf[~edges_gdf.index.isin(list(new_edges_gdf.index))]
 
     new_edges_gdf = new_edges_gdf.reset_index()
@@ -711,39 +685,40 @@ def __split_at_edges(nodes_gdf, edges_gdf, new_edges_gdf):
             message="Geometry column does not contain geometry.",
         )
         edge_selection = new_edges_gdf[
-            ["u", "v", "key", "edge_index"] + EDGE_COLS + ["length", "geometry"]
+            ["u", "v", "key", "edge_index"] + edge_cols + ["length", "geometry"]
         ].copy()
-        edge_selection["geometry"] = edge_selection["geometry"].to_wkt()
-        edge_selection["geometry"] = edge_selection["geometry"].astype(str)
-        edge_selection[EDGE_COLS] = edge_selection[EDGE_COLS].astype(str)
+        edge_selection["geometry"] = edge_selection["geometry"].to_wkt().astype(str)
+        edge_selection[edge_cols] = edge_selection[edge_cols].astype(str)
+        edge_selection["length"] = edge_selection["length"].astype(float)
+        edge_selection[["u", "v", "key"]] = edge_selection[["u", "v", "key"]].astype(
+            int
+        )
         edge_selection_pl = pl.from_pandas(edge_selection)
 
     new_edges = new_edges_gdf[
-        ["u", "v", "key", "edge_index"]
-        + EDGE_COLS
-        + ["length", "geometry"]
-        + ["new_node_id", "point"]
+        ["u", "v", "key", "edge_index"] + edge_cols + ["new_node_id", "point", "length"]
     ].copy()
-    new_edges[EDGE_COLS] = new_edges[EDGE_COLS].astype(str)
+    new_edges[edge_cols] = new_edges[edge_cols].astype(str)
     new_edges["pt_x"] = new_edges["point"].get_coordinates()["x"]
     new_edges["pt_y"] = new_edges["point"].get_coordinates()["y"]
-    new_edges = new_edges.drop(columns=["point", "geometry"])
+    new_edges = new_edges.drop(columns=["point"])
     new_edges_pl = pl.from_pandas(new_edges)
 
     new_nodes_gdf = gpd.GeoDataFrame(
-        new_edges_gdf[NODE_COLS + ["new_node_id"]],
+        nodes_gdf.loc[new_edges_gdf["u"]].reset_index(drop=True),
         geometry=new_edges_gdf["point"],
         crs=nodes_gdf.crs,
     )
+
+    node_columns_in_edges = list(
+        set(new_nodes_gdf.columns)
+        & set(new_edges_gdf) - {"geometry", "point", "new_node_id"}
+    )
+    new_nodes_gdf[node_columns_in_edges] = new_edges_gdf[node_columns_in_edges]
+    new_nodes_gdf["osmid"] = new_edges_gdf["new_node_id"]
     new_nodes_gdf["x"] = new_nodes_gdf["geometry"].get_coordinates()["x"]
     new_nodes_gdf["y"] = new_nodes_gdf["geometry"].get_coordinates()["y"]
-    new_nodes_gdf = new_nodes_gdf.rename(columns={"new_node_id": "osmid"})
-    for c in NODE_COLS:
-        if c not in new_nodes_gdf.columns:
-            new_nodes_gdf[c] = None
-
-    new_nodes_gdf = new_nodes_gdf[["osmid", "x", "y"] + NODE_COLS + ["geometry"]]
-    new_nodes_gdf[NODE_COLS] = new_nodes_gdf[NODE_COLS].astype(str)
+    new_nodes_gdf[node_cols] = new_nodes_gdf[node_cols].astype(str)
     new_nodes_gdf = new_nodes_gdf.drop_duplicates("osmid")
     new_nodes_gdf = new_nodes_gdf.set_index("osmid")
 
@@ -763,7 +738,7 @@ def __split_at_edges(nodes_gdf, edges_gdf, new_edges_gdf):
 
     columns = (
         ["u", "v", "key", "edge_index"]
-        + EDGE_COLS
+        + edge_cols
         + ["length", "pt_x", "pt_y", "pt_sequence", "new_node_id"]
     )
     new_edges_pl = new_edges_pl.select(columns)
@@ -807,7 +782,7 @@ def __split_at_edges(nodes_gdf, edges_gdf, new_edges_gdf):
         .agg(
             pl.col("new_node_id").sort_by("length").first().alias("new_u"),
             pl.col("new_node_id").sort_by("length").last().alias("new_v"),
-            pl.col(["u", "v", "key"] + EDGE_COLS).first(),
+            pl.col(["u", "v", "key"] + edge_cols).first(),
             pl.col("points").sort_by("length"),
         )
         .with_columns(
@@ -837,7 +812,7 @@ def __split_at_edges(nodes_gdf, edges_gdf, new_edges_gdf):
     )
     new_edges_gdf["length"] = new_edges_gdf.length
     new_edges_gdf = new_edges_gdf[
-        ["u", "v", "key"] + EDGE_COLS + ["length", "geometry"]
+        ["u", "v", "key"] + edge_cols + ["length", "geometry"]
     ]
     new_edges_gdf["u"] = new_edges_gdf["u"].astype(int)
     new_edges_gdf["v"] = new_edges_gdf["v"].astype(int)
@@ -865,8 +840,12 @@ def add_points_to_graph(
     points = points.to_crs(G.graph["crs"]).copy()
 
     nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
-    nodes_gdf[NODE_COLS] = nodes_gdf[NODE_COLS].astype(str)
-    edges_gdf[EDGE_COLS] = edges_gdf[EDGE_COLS].astype(str)
+
+    node_cols = list(set(nodes_gdf.columns) - {"geometry", "x", "y"})
+    edge_cols = list(set(edges_gdf.columns) - {"geometry", "length"})
+
+    nodes_gdf[node_cols] = nodes_gdf[node_cols].astype(str)
+    edges_gdf[edge_cols] = edges_gdf[edge_cols].astype(str)
 
     nearest_indices = edges_gdf.sindex.nearest(points.geometry, max_distance=max_dist)
     new_edges_gdf = edges_gdf.iloc[nearest_indices[1, :]]
@@ -964,7 +943,7 @@ def __multi_ego_graph(
     radius: float = 1,
     center: bool = True,
     undirected: bool = False,
-    distance: str = "length",
+    weight: str = "length",
 ):
     """Returns induced subgraph of neighbors centered at node n within
     a given radius.
@@ -986,9 +965,9 @@ def __multi_ego_graph(
     undirected : bool, optional
       If True use both in- and out-neighbors of directed graphs.
 
-    distance : key, optional
+    weight : key, optional
       Use specified edge data key as distance.  For example, setting
-      distance='weight' will use the edge weight to measure the
+      weight='length' will use the edge weight to measure the
       distance from the node n.
 
     Notes
@@ -1001,9 +980,9 @@ def __multi_ego_graph(
     Node, edge, and graph attributes are copied to the returned subgraph.
     """
     if undirected:
-        if isinstance(distance, str):
+        if isinstance(weight, str):
             sp, _ = nx.multi_source_dijkstra(
-                G.to_undirected(), n, cutoff=radius, weight=distance
+                G.to_undirected(), n, cutoff=radius, weight=weight
             )
         else:
             sp = dict(
@@ -1012,17 +991,20 @@ def __multi_ego_graph(
                 )
             )
     else:
-        if isinstance(distance, str):
-            sp, _ = nx.multi_source_dijkstra(G, n, cutoff=radius, weight=distance)
+        if isinstance(weight, str):
+            sp, _ = nx.multi_source_dijkstra(G, n, cutoff=radius, weight=weight)
         else:
             sp = dict(nx.multi_source_dijkstra_path_length(G, n, cutoff=radius))
 
     H = G.subgraph(sp).copy()
     nx.set_node_attributes(H, sp, "dist_to_center")
+    remaining_dist = radius - np.array(list(sp.values()))
+    remaining_dist = dict(zip(sp.keys(), remaining_dist))
+    nx.set_node_attributes(H, remaining_dist, "remaining_dist")
     if not center:
         H.remove_node(n)
 
-    return H
+    return H, sp, remaining_dist
 
 
 def crop_graph_by_iso_nodes(
@@ -1099,15 +1081,15 @@ def crop_graph_by_iso_nodes(
 
 
 def __exact_isochrone_gdfs(
-    nodes_gdf, edges_gdf, nodes_iso_gdf, radius, undirected, outbound, min_edge_length
+    nodes_gdf, edges_gdf, nodes_iso_gdf, undirected, outbound, min_edge_length
 ):
     node_ids = list(nodes_iso_gdf.index)
     nodes_iso_gdf = nodes_iso_gdf.reset_index()
     edges_border_gdf = edges_gdf.reset_index().copy()
     if undirected or outbound:
         edges_border_gdf = edges_border_gdf.merge(
-            nodes_iso_gdf[["osmid", "dist_to_center"]].rename(
-                columns={"osmid": "u", "dist_to_center": "remaining_dist_u"}
+            nodes_iso_gdf[["osmid", "remaining_dist"]].rename(
+                columns={"osmid": "u", "remaining_dist": "remaining_dist_u"}
             ),
             on="u",
             how="left",
@@ -1117,8 +1099,8 @@ def __exact_isochrone_gdfs(
 
     if undirected or (not outbound):
         edges_border_gdf = edges_border_gdf.merge(
-            nodes_iso_gdf[["osmid", "dist_to_center"]].rename(
-                columns={"osmid": "v", "dist_to_center": "remaining_dist_v"}
+            nodes_iso_gdf[["osmid", "remaining_dist"]].rename(
+                columns={"osmid": "v", "remaining_dist": "remaining_dist_v"}
             ),
             on="v",
             how="left",
@@ -1126,8 +1108,6 @@ def __exact_isochrone_gdfs(
         if (not outbound) and (not undirected):
             edges_border_gdf["remaining_dist_u"] = None
 
-    edges_border_gdf["remaining_dist_u"] = radius - edges_border_gdf["remaining_dist_u"]
-    edges_border_gdf["remaining_dist_v"] = radius - edges_border_gdf["remaining_dist_v"]
     edges_border_gdf["remaining_dist_u"] = edges_border_gdf["remaining_dist_u"].fillna(
         0
     )
@@ -1291,8 +1271,8 @@ def isochrone(
         else:
             return G, []
 
-    H = __multi_ego_graph(
-        G, nodes, radius, center=True, undirected=undirected, distance=distance_column
+    H, _, _ = __multi_ego_graph(
+        G, nodes, radius, center=True, undirected=undirected, weight=distance_column
     )
 
     if not exact:
@@ -1312,7 +1292,6 @@ def isochrone(
         nodes_gdf,
         edges_gdf,
         nodes_iso_gdf,
-        radius=radius,
         undirected=undirected,
         outbound=outbound,
         min_edge_length=min_edge_length,
