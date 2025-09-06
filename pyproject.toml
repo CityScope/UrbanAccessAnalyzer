@@ -29,6 +29,6 @@ dev = [
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-package-dir = {"" = "UrbanAccessAnalyzer"}
-packages = ["UrbanAccessAnalyzer"]
+[tool.setuptools.packages.find]
+include = ["UrbanAccessAnalyzer*"]
+exclude = ["tutorials*"]
