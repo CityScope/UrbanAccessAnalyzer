@@ -16,10 +16,7 @@ def _write_poly_file(aoi: gpd.GeoDataFrame | gpd.GeoSeries, poly_path: str):
     handling Polygons, MultiPolygons, and interior rings (holes).
     """
     # Ensure a single, valid geometry in WGS84 projection
-    if not aoi.crs or not aoi.crs.to_epsg() == 4326:
-        geom = aoi.to_crs(4326).union_all()
-    else:
-        geom = aoi.union_all()
+    geom = aoi.to_crs(4326).union_all()
 
     with open(poly_path, "w") as f:
         f.write("aoi\n")  # Polygon name
