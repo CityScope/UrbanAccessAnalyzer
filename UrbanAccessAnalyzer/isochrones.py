@@ -402,6 +402,9 @@ def graph(
     level_of_services=None,
     min_edge_length=0,
 ):
+    if service_quality_col is None:
+        points['service_quality_col'] = 1 
+        
     ls_process_order_df = __distance_matrix_to_processing_order(
         distance_matrix=distance_matrix, level_of_services=level_of_services
     )
