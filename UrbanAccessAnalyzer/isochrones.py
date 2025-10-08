@@ -75,6 +75,9 @@ def __compute_isochrones(G, points, ls_process_order_df, service_quality_col=Non
         ),
         total=len(ls_process_order_df),
     ):
+        if quality is int:
+            quality = [quality]
+            
         node_ids = list(
             points.loc[points[service_quality_col].isin(quality), "osmid"]
             .dropna()
@@ -404,7 +407,7 @@ def graph(
 ):
     if service_quality_col is None:
         points['service_quality_col'] = 1 
-        
+
     ls_process_order_df = __distance_matrix_to_processing_order(
         distance_matrix=distance_matrix, level_of_services=level_of_services
     )
