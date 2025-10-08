@@ -125,7 +125,7 @@ def get_country_region(lat, lon, code_format="alpha_2",get_region:bool=True):
     return country_code, subdivision_code
 
 
-def download_worldpop_population(aoi: gpd.GeoDataFrame, date: date|datetime|int, folder:str=None, overwrite:bool=False, resolution:str="100m") -> str:
+def download_worldpop_population(aoi: gpd.GeoDataFrame, date: date|datetime|int, folder:str=None, overwrite:bool=False, resolution:str="100m", dataset:str='pop', subset:str="wpgpunadj") -> str:
     """
     Download WorldPop population raster for a given AOI and year.
 
@@ -146,7 +146,7 @@ def download_worldpop_population(aoi: gpd.GeoDataFrame, date: date|datetime|int,
     filepath : str
         Path to the downloaded GeoTIFF file.
 
-    All population datasets available are here https://hub.worldpop.org/rest/data/pop/
+    All population datasets available are here https://hub.worldpop.org/rest/data/
     """
 
     if isinstance(date,int):
@@ -175,18 +175,35 @@ def download_worldpop_population(aoi: gpd.GeoDataFrame, date: date|datetime|int,
         
     year = date.year
 
-    if year < 2015:
-        # ---- Global1 (2000–2020 uncontrained UN normalized) ----
-        if resolution == "100m":
-            url = f"https://hub.worldpop.org/rest/data/pop/wpgpunadj?iso3={iso3}"
-        else:
-            url = f"https://hub.worldpop.org/rest/data/pop/wpicuadj1km?iso3={iso3}"
+    if (dataset == "pop") and (subset is None):
+        if year < 2015:
+            if resolution == "100m":
+                subset = "wpgpunadj"
+            elif resolution == "1km":
+                subset = "wpicuadj1km"
 
-    elif 2015 <= year <= 2030:
-        # ---- Global2 (2015–2030 constrained datasets) ----
-        url = f"https://hub.worldpop.org/rest/data/pop/G2_CN_POP_R25A_{resolution}?iso3={iso3}"
-    else:
-        raise ValueError(f"No WorldPop dataset available for year {year}")
+            url = f"https://hub.worldpop.org/rest/data/{dataset}/{subset}?iso3={iso3}"
+
+        elif 2015 <= year <= 2030:
+            if resolution is None:
+                resolution = "100m"
+            subset = f"G2_CN_POP_R25A_{resolution}"
+            url = f"https://hub.worldpop.org/rest/data/pop/{subset}?iso3={iso3}"
+
+        else:
+            raise ValueError(f"No WorldPop dataset available for year {year}")
+        
+    elif (dataset == "age_structures"):
+        if resolution is None:
+            resolution = "100m"
+
+        if subset is None:
+            subset = f"G2_CN_Age_2024_{resolution}"
+
+        if (subset == "under_18") or (subset == "U18"):
+            subset = f"G2_Age_U18_R25A_{resolution}" 
+
+        url = f"https://hub.worldpop.org/rest/data/{dataset}/{subset}?iso3={iso3}"
 
     r = requests.get(url)
     r.raise_for_status()
