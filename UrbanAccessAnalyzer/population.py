@@ -12,6 +12,7 @@ import warnings
 import numpy as np
 import geopandas as gpd
 import warnings
+from tqdm import tqdm
 from . import raster_utils
 
 
@@ -125,7 +126,17 @@ def get_country_region(lat, lon, code_format="alpha_2",get_region:bool=True):
     return country_code, subdivision_code
 
 
-def download_worldpop_population(aoi: gpd.GeoDataFrame, date: date|datetime|int, folder:str=None, overwrite:bool=False, resolution:str="100m", dataset:str='pop', subset:str="wpgpunadj") -> str:
+def download_worldpop_population(
+    aoi: gpd.GeoDataFrame, 
+    date: date|datetime|int, 
+    folder:str=None, 
+    overwrite:bool=False, 
+    resolution:str="100m", 
+    dataset:str='pop', 
+    subset:str="wpgpunadj", 
+    chunk_size:int=1048576
+) -> str:
+    
     """
     Download WorldPop population raster for a given AOI and year.
 
@@ -235,9 +246,19 @@ def download_worldpop_population(aoi: gpd.GeoDataFrame, date: date|datetime|int,
         # Download file
         with requests.get(file_url, stream=True) as rfile:
             rfile.raise_for_status()
-            with open(raster_path, "wb") as f:
-                for chunk in rfile.iter_content(chunk_size=8192):
-                    f.write(chunk)
+            total_size = int(rfile.headers.get('content-length', 0))
+    
+            with open(raster_path, "wb") as f, tqdm(
+                total=total_size,
+                unit='B',
+                unit_scale=True,
+                desc="Downloading",
+                ncols=100
+            ) as pbar:
+                for chunk in rfile.iter_content(chunk_size=chunk_size):
+                    if chunk:  # skip keep-alive chunks
+                        f.write(chunk)
+                        pbar.update(len(chunk))
 
     return raster_path
 
