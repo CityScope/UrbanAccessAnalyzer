@@ -75,7 +75,7 @@ def __compute_isochrones(G, points, ls_process_order_df, service_quality_col=Non
         ),
         total=len(ls_process_order_df),
     ):
-        if quality is int:
+        if isinstance(quality, int):
             quality = [quality]
             
         node_ids = list(
