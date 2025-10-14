@@ -417,7 +417,6 @@ def vectorize(
     )
 
 
-
 def rasterize(
     gdf: gpd.GeoDataFrame,
     transform: Affine,
