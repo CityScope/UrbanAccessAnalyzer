@@ -186,11 +186,12 @@ def download_worldpop_population(
         
     year = date.year
 
-    if (dataset == "pop") and (subset is None):
+    url = None 
+    if (dataset == "pop"):
         if year < 2015:
-            if resolution == "100m":
+            if (resolution == "100m") and (subset is None):
                 subset = "wpgpunadj"
-            elif resolution == "1km":
+            elif (resolution == "1km") and (subset is None):
                 subset = "wpicuadj1km"
 
             url = f"https://hub.worldpop.org/rest/data/{dataset}/{subset}?iso3={iso3}"
