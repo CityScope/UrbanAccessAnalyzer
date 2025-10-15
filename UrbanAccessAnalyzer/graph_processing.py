@@ -885,15 +885,17 @@ def add_points_to_graph(
                 points_orig, G, max_dist=min_edge_length + max_dist + 0.01
             )  # This is not the most efficient way
 
+    min_id = nodes_gdf.index.max()
+    min_id = max(min_id,edges_gdf.index.get_level_values('u').max())
+    min_id = max(min_id,edges_gdf.index.get_level_values('v').max())
+    min_id += 1 
     if ("id" in points.columns) and (points["id"].dtype == int):
         if any(points["id"].isin(nodes_gdf.index)):
             warnings.warn(
                 "Some of the ids in points column 'id' are in nodes 'osmid'. Using default ids."
             )
-            min_id = nodes_gdf.index.max() + 1
             new_edges_gdf["new_node_id"] = min_id + np.arange(0, len(new_edges_gdf))
     else:
-        min_id = nodes_gdf.index.max() + 1
         new_edges_gdf["new_node_id"] = min_id + np.arange(0, len(new_edges_gdf))
 
     new_edges_gdf["point_edge_id"] = round(

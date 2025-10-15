@@ -268,16 +268,12 @@ def filter_population_by_streets(streets_gdf,population,street_buffer,aoi=None,t
     streets_gdf.geometry = streets_gdf.geometry.simplify(street_buffer/2).buffer(street_buffer,resolution=4)
     
     if isinstance(population,str):
-        raster, transform, crs = raster_utils.read_raster(population,aoi,nodata=0)
+        raster, transform, crs = raster_utils.read_raster(population,aoi,nodata=0, projected=False)
     elif isinstance(population,np.ndarray):
         if (transform is None) or (crs is None):
             raise Exception("If providing a population np.ndarray transform and crs are required")
         
         raster = population
-
-        if not crs.is_projected:
-            raster, transform, crs = raster_utils.reproject_to_utm(raster,transform,crs)
-    
     else:
         if scale:
             total_population = np.nansum(population[population_column])
@@ -293,7 +289,7 @@ def filter_population_by_streets(streets_gdf,population,street_buffer,aoi=None,t
         return population
     
     streets_gdf['value'] = 1
-    streets_raster = raster_utils.rasterize(gdf=streets_gdf[['value','geometry']],shape=raster,transform=transform,crs=crs,value_column='value',background_value=0)
+    streets_raster = raster_utils.rasterize(gdf=streets_gdf[['value','geometry']].to_crs(crs),shape=raster,transform=transform,crs=crs,value_column='value',background_value=0)
     
     if scale:
         total_population = np.nansum(raster)
@@ -316,13 +312,9 @@ def density(population_data:str|gpd.GeoDataFrame|np.ndarray,aoi=None,buffer:floa
             raise Exception("If provinding raster array transform and crs are required")
         
         raster = population_data
-
-        if not crs.is_projected:
-            raster, transform, crs = raster_utils.reproject_to_utm(raster,transform,crs)
-    
+            
         raster[np.isnan(raster)] = 0 
         raster[raster < 0] = 0 
-
     else:
         if isinstance(population_data,str):
             population_data_path = population_data 
@@ -340,9 +332,27 @@ def density(population_data:str|gpd.GeoDataFrame|np.ndarray,aoi=None,buffer:floa
             
             population_data_path = raster_utils.rasterize() 
 
-        raster, transform, crs = raster_utils.read_raster(population_data_path,aoi=aoi,nodata=0)
-        
-    new_raster = raster_utils.buffer_mean(raster,transform,buffer=buffer)
+        raster, transform, crs = raster_utils.read_raster(population_data_path,aoi=aoi,nodata=0, projected=False)
+        raster[np.isnan(raster)] = 0 
+        raster[raster < 0] = 0 
+
+    if crs.is_projected:
+        raster_utm, transform_utm, crs_utm = raster, transform, crs
+    else:
+        raster_utm, transform_utm, crs_utm = raster_utils.reproject(raster,transform,crs,dst_crs='utm')
+    
+            
+    new_raster = raster_utils.buffer_mean(raster_utm,transform_utm,buffer=buffer)
+    new_raster, _, _ = raster_utils.reproject(
+        new_raster,
+        transform_utm,
+        crs_utm,
+        dst_transform=transform,
+        dst_crs=crs,
+        height=raster.shape[0],
+        width=raster.shape[1]
+    )
+    
 
     if return_raster:
         return new_raster

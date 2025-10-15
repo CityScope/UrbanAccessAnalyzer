@@ -9,18 +9,15 @@ from pyproj import Transformer
 import warnings 
 import numpy as np
 import rasterio as rio
-from rasterio.transform import Affine
 from rasterio.crs import CRS
-from rasterio.enums import Resampling
-from rasterio.warp import reproject, calculate_default_transform
+import rasterio.warp
+from rasterio.warp import Resampling, calculate_default_transform
 from rasterio.features import rasterize as rio_rasterize
 from rasterio.windows import from_bounds as window_from_bounds
-from rasterio.transform import xy
 import geopandas as gpd
 from pathlib import Path
 from typing import Union, Tuple, Optional, List
 from pyproj import Transformer
-import warnings
 import math
 from scipy.ndimage import convolve
 from skimage.morphology import disk # For density_raster kernel
@@ -66,138 +63,72 @@ def extract_affine_params(transform: Union[Affine, np.ndarray]) -> Tuple[float, 
     else:
         raise ValueError("Unrecognized transform format. Must be rasterio.Affine or a 3x3 NumPy array.")
 
-
-def utm_zone_from_lon(lon: float) -> int:
-    """
-    Calculates the UTM zone number from a given longitude.
-
-    Parameters
-    ----------
-    lon : float
-        Longitude in decimal degrees.
-
-    Returns
-    -------
-    int
-        The corresponding UTM zone number (1-60).
-    """
-    return int((lon + 180) // 6) + 1
-
-
-def reproject_to_utm(
+def reproject(
     data: np.ndarray,
     transform: Affine,
     crs: CRS,
     src_nodata: Optional[Union[int, float]] = None,
-    dst_nodata: Optional[float] = np.nan # Default target nodata to np.nan for float arrays
+    dst_nodata: Optional[float] = np.nan,
+    dst_transform = None,
+    dst_crs: Optional[Union[CRS,int,str]] = 'utm',
+    width:int|None=None,
+    height:int|None=None
 ) -> Tuple[np.ndarray, Affine, CRS]:
     """
-    Reprojects a raster dataset (numpy array, transform, CRS) to its appropriate local UTM zone.
-    If the CRS is already the target UTM zone, it will still process the data to ensure
-    the output is of float64 dtype and uses `dst_nodata` (defaulting to np.nan) for nodata values.
-
-    Parameters
-    ----------
-    data : np.ndarray
-        The input raster data array.
-    transform : rasterio.Affine
-        The affine transform of the input data.
-    crs : rasterio.crs.CRS
-        The Coordinate Reference System of the input data.
-    src_nodata : Optional[Union[int, float]]
-        The nodata value of the source raster. If None, nodata is not taken into account
-        for source (but will still be set for destination if dst_nodata is provided).
-    dst_nodata : Optional[float]
-        The nodata value for the destination raster. Defaults to np.nan.
-
-    Returns
-    -------
-    Tuple[np.ndarray, Affine, CRS]
-        A tuple containing:
-        - The reprojected numpy array (always float64 with `dst_nodata` for nodata).
-        - The affine transform of the reprojected data.
-        - The CRS of the reprojected data (the local UTM zone).
+    Reprojects a raster to its local UTM zone while preserving the pixel grid.
+    Returns float64 array with dst_nodata.
     """
+    # Determine target UTM CRS using raster center
+    left, bottom, right, top = array_bounds(data.shape[0], data.shape[1], transform)
+    if (dst_crs is None) or (dst_crs == 'utm') or ('project' in str(dst_crs)):
+        raster_geom = gpd.GeoSeries([shapely.geometry.box(left, bottom, right, top)], crs=crs)
+        dst_crs = raster_geom.estimate_utm_crs()  # projected CRS
 
-    # --- Step 1. Get raster center coordinates ---
-    center_col, center_row = data.shape[1] // 2, data.shape[0] // 2
-    x_center, y_center = xy(transform, center_row, center_col, offset="center")
+    if height is None:
+        height = data.shape[0]
 
-    # --- Step 2. Ensure we have lon/lat for UTM determination ---
-    if not crs.is_geographic:
-        try:
-            transformer = Transformer.from_crs(crs, WGS84_CRS, always_xy=True)
-            lon, lat = transformer.transform(x_center, y_center)
-        except Exception as e:
-            raise ValueError(
-                f"Cannot determine UTM zone from CRS {crs.to_string()} "
-                f"for center point ({x_center}, {y_center}). Error: {e}"
-            )
-    else:
-        # Geographic CRS
-        if crs != WGS84_CRS:
-            transformer = Transformer.from_crs(crs, WGS84_CRS, always_xy=True)
-            lon, lat = transformer.transform(x_center, y_center)
-        else:
-            lon, lat = x_center, y_center  # Already WGS84 lon/lat
+    if width is None: 
+        width = data.shape[1]
 
-    # --- Step 3. Build target UTM CRS ---
-    zone = utm_zone_from_lon(lon)
-    south = lat < 0
-    epsg_code = 32600 + zone if not south else 32700 + zone
-    utm_crs = CRS.from_epsg(epsg_code)
-
-    # Decide if reprojection (CRS change) is strictly necessary
-    perform_crs_reprojection = (crs != utm_crs)
-
-    if perform_crs_reprojection:
-        # --- Step 5. Calculate new transform and shape for reprojection ---
-        left, bottom, right, top = array_bounds(
-            data.shape[0], data.shape[1], transform
-        )
+    if dst_transform is None:
+        # Calculate aligned projected transform
         dst_transform, width, height = calculate_default_transform(
-            crs, utm_crs, data.shape[1], data.shape[0],
-            left=left, bottom=bottom, right=right, top=top
+            crs, dst_crs, width, height, left, bottom, right, top
         )
-    else:
-        # CRS is already correct, but we still proceed to handle nodata/dtype conversion
-        dst_transform = transform
-        height, width = data.shape[0], data.shape[1]
 
-    # --- Step 6. Allocate destination array ---
-    # The output array should always be float64 to support np.nan for nodata
-    # and for general consistency in subsequent calculations.
-    output_dtype = np.float64
-    dst_array = np.empty((height, width), dtype=output_dtype)
+    # Allocate destination array
+    dst_array = np.empty((height, width), dtype=np.float64)
 
-    # --- Step 7. Reproject and/or Nodata/Dtype Conversion ---
-    # rasterio.warp.reproject is used even if CRS is the same to ensure
-    # `dst_array` receives the correct dtype and `dst_nodata` values.
-    reproject(
+    # Reproject
+    rasterio.warp.reproject(
         source=data,
         destination=dst_array,
         src_transform=transform,
         src_crs=crs,
         dst_transform=dst_transform,
-        dst_crs=utm_crs,
-        resampling=Resampling.bilinear, # Bilinear resampling is a good default
+        dst_crs=dst_crs,
+        resampling=Resampling.nearest,
         src_nodata=src_nodata,
-        dst_nodata=dst_nodata,
+        dst_nodata=dst_nodata
     )
 
-    dst_array[dst_array == src_nodata] = dst_nodata
+    # Fill any remaining src_nodata
+    if src_nodata is not None:
+        dst_array[dst_array == src_nodata] = dst_nodata
 
-    return dst_array, dst_transform, utm_crs
+    return dst_array, dst_transform, dst_crs
 
 
 def raster_crop(
     src_input: Union[str, Path, rio.io.DatasetReader],
     aoi: Optional[Union[gpd.GeoDataFrame, gpd.GeoSeries]] = None,
     nodata: float = np.nan,
+    projected: bool = False
 ) -> Tuple[np.ndarray, Affine, CRS, int, int]:
     """
     Crop a GeoTIFF raster to the AOI and return data, transform, CRS, height, width.
     Efficient: only reads the raster window covering AOI (does not load full raster).
+    Ensures pixel grid alignment and prevents over-reads.
     """
     _src = None
     if isinstance(src_input, (str, Path)):
@@ -214,7 +145,12 @@ def raster_crop(
         current_crs = _src.crs
         current_src_nodata = _src.nodata
 
-        if aoi is not None:
+        if aoi is None:
+            # Only if no AOI: read full raster (may be huge!)
+            current_data = _src.read(1)
+            current_transform = _src.transform
+
+        else:
             # Unify geometry
             if isinstance(aoi, gpd.GeoDataFrame):
                 geom_to_crop = aoi.geometry.union_all()
@@ -232,23 +168,42 @@ def raster_crop(
             if geom_to_crop.is_empty:
                 raise ValueError("AOI is empty after reprojecting to raster CRS.")
 
-            # Compute window and read only that
-            window = window_from_bounds(*geom_to_crop.bounds, transform=_src.transform)
+            # Clip AOI bounds to raster extent
+            aoi_bounds = geom_to_crop.bounds
+            raster_bounds = _src.bounds
+            clipped_bounds = (
+                max(aoi_bounds[0], raster_bounds.left),
+                max(aoi_bounds[1], raster_bounds.bottom),
+                min(aoi_bounds[2], raster_bounds.right),
+                min(aoi_bounds[3], raster_bounds.top),
+            )
+
+            # Compute window snapped to pixel grid
+            window = window_from_bounds(*clipped_bounds, transform=_src.transform)
+            window = window.round_offsets(op="floor").round_lengths(op="ceil")
+
+            # Sanity check: prevent huge reads
+            if window.width * window.height > 2_500_000_000:  # ~2GB float32
+                raise MemoryError(f"AOI too large: {window.width}x{window.height} pixels")
+
+            # Read cropped, grid-aligned data
             current_data = _src.read(1, window=window)
             current_transform = _src.window_transform(window)
-        else:
-            # Only if no AOI: read full raster (may be huge!)
-            current_data = _src.read(1)
-            current_transform = _src.transform
 
-        # Reproject to UTM (still efficient, just on cropped data)
-        data, transform, crs = reproject_to_utm(
-            current_data,
-            current_transform,
-            current_crs,
-            src_nodata=current_src_nodata,
-            dst_nodata=nodata,
-        )
+        # Optional: reproject to UTM or other CRS
+        if projected:
+            data, transform, crs = reproject(
+                current_data,
+                current_transform,
+                current_crs,
+                src_nodata=current_src_nodata,
+                dst_nodata=nodata,
+                dst_crs='utm'
+            )
+        else:
+            data = current_data
+            transform = current_transform
+            crs = current_crs
 
         height, width = data.shape
         return data, transform, crs, height, width
@@ -257,9 +212,7 @@ def raster_crop(
         if isinstance(src_input, (str, Path)) and _src is not None:
             _src.close()
 
-
-
-def read_raster(path: Union[str, Path], aoi: Optional[Union[gpd.GeoDataFrame, gpd.GeoSeries]] = None, nodata: float = np.nan) -> Tuple[np.ndarray, Affine, CRS]:
+def read_raster(path: Union[str, Path], aoi: Optional[Union[gpd.GeoDataFrame, gpd.GeoSeries]] = None, nodata: float = np.nan, projected:bool=False) -> Tuple[np.ndarray, Affine, CRS]:
     """
     Reads a raster from a given path, optionally crops it to an AOI, and
     reprojects it to UTM if its native CRS is geographic.
@@ -281,7 +234,7 @@ def read_raster(path: Union[str, Path], aoi: Optional[Union[gpd.GeoDataFrame, gp
         - crs (CRS): The CRS of the output raster (UTM if source was geographic).
     """
     # raster_crop now handles reprojection, cropping, and consistent nodata/dtype output
-    population, transform, crs, _, _ = raster_crop(path, aoi, nodata=nodata)
+    population, transform, crs, _, _ = raster_crop(path, aoi, nodata=nodata, projected=projected)
     
     return population, transform, crs
 
