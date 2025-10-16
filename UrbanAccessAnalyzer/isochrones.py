@@ -365,7 +365,10 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
     )
     edges_border_gdf["length"] = edges_border_gdf["projected_dist"]
 
-    min_id = nodes_gdf["osmid"].max() + 1
+    min_id = nodes_gdf["osmid"].max()
+    min_id = max(min_id,edges_gdf['u'].max())
+    min_id = max(min_id,edges_gdf['v'].max())
+    min_id += 1 
     new_border_node_ids = list(min_id + np.arange(0, len(edges_border_gdf)))
     edges_border_gdf["new_node_id"] = new_border_node_ids
 

@@ -1234,7 +1234,10 @@ def __exact_isochrone_gdfs(
     )
     edges_border_gdf["length"] = edges_border_gdf["projected_dist"]
 
-    min_id = nodes_gdf.index.max() + 1
+    min_id = nodes_gdf.index.max()
+    min_id = max(min_id,edges_gdf.index.get_level_values('u').max())
+    min_id = max(min_id,edges_gdf.index.get_level_values('v').max())
+    min_id += 1 
     new_border_node_ids = list(min_id + np.arange(0, len(edges_border_gdf)))
     edges_border_gdf["new_node_id"] = new_border_node_ids
     border_node_ids += new_border_node_ids
