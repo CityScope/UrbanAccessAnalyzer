@@ -14,7 +14,7 @@ import geopandas as gpd
 import warnings
 from tqdm import tqdm
 from . import raster_utils
-
+import copy
 
 def ls_str_to_int(arr,ref_list):
     # Create a mapping dict from value -> index
@@ -273,7 +273,7 @@ def filter_population_by_streets(streets_gdf,population,street_buffer,aoi=None,t
         if (transform is None) or (crs is None):
             raise Exception("If providing a population np.ndarray transform and crs are required")
         
-        raster = population
+        raster = copy.copy(population)
     else:
         if scale:
             total_population = np.nansum(population[population_column])
@@ -311,7 +311,7 @@ def density(population_data:str|gpd.GeoDataFrame|np.ndarray,aoi=None,buffer:floa
         if (transform is None) or (crs is None):
             raise Exception("If provinding raster array transform and crs are required")
         
-        raster = population_data
+        raster = copy.copy(population_data)
             
         raster[np.isnan(raster)] = 0 
         raster[raster < 0] = 0 
@@ -403,7 +403,7 @@ def level_of_service(
         if (transform is None) or (crs is None):
             raise Exception("If providing a population np.ndarray transform and crs are required")
         
-        pop_raster = population
+        pop_raster = copy.copy(population)
     else:
         pop_raster, transform, crs = raster_utils.rasterize(population)
 
