@@ -80,6 +80,50 @@ def polars_to_graph(nodes_pl, edges_pl, crs, graph_attrs, compute_length: bool =
 
     return G
 
+def __fix_duplicate_indices(nodes_gdf, edges_gdf, min_id = 0):
+    # --- Step 1: Fix duplicated node indices ---
+    dup_nodes = nodes_gdf.index[nodes_gdf.index.duplicated()].unique()
+    if len(dup_nodes) > 0:
+        print(f"Duplicated node indices found: {dup_nodes.tolist()}")
+
+        # Build mapping of old -> new indices
+        new_indices = {}
+        for idx in dup_nodes:
+            if idx > min_id:
+                new_idx = nodes_gdf.index.max() + 1
+                new_indices[idx] = new_idx
+                # Rename in nodes_gdf
+                nodes_gdf = nodes_gdf.rename(index={idx: new_idx})
+
+        # Update edges multiindex (u, v) using mapping
+        if new_indices:
+            # Extract MultiIndex into DataFrame
+            idx_df = edges_gdf.index.to_frame(index=False)
+            idx_df["u"] = idx_df["u"].replace(new_indices)
+            idx_df["v"] = idx_df["v"].replace(new_indices)
+            # Reassign MultiIndex
+            edges_gdf.index = pd.MultiIndex.from_frame(idx_df, names=edges_gdf.index.names)
+
+    # --- Step 2: Fix duplicated edges by reassigning key ---
+    if edges_gdf.index.duplicated().any():
+        dup_edges = edges_gdf.index[edges_gdf.index.duplicated(keep=False)]
+        print(f"Duplicated edge indices found:\n{dup_edges}")
+
+        # Convert MultiIndex to DataFrame
+        idx_df = edges_gdf.index.to_frame(index=False)
+
+        # Sort by (u, v) to keep deterministic ordering
+        idx_df = idx_df.sort_values(["u", "v", "key"]).reset_index(drop=True)
+
+        # Reassign 'key' to be sequential within each (u, v)
+        idx_df["key"] = idx_df.groupby(["u", "v"]).cumcount()
+
+        # Reassign MultiIndex
+        edges_gdf.index = pd.MultiIndex.from_frame(idx_df, names=edges_gdf.index.names)
+
+    return nodes_gdf, edges_gdf
+
+
 
 def __connected_node_groups(nodes_pl, edges_pl, max_dist: float | None = None):
     edges_pl = edges_pl.with_columns(
@@ -925,6 +969,7 @@ def add_points_to_graph(
 
     nodes_gdf, edges_gdf = __split_at_edges(nodes_gdf, edges_gdf, new_edges_gdf)
 
+    nodes_gdf, edges_gdf = __fix_duplicate_indices(nodes_gdf,edges_gdf,min_id)
     new_G = ox.graph_from_gdfs(
         gdf_nodes=nodes_gdf, gdf_edges=edges_gdf, graph_attrs=graph_attrs
     )

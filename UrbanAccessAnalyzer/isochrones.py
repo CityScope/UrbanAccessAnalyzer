@@ -187,15 +187,19 @@ def __set_edge_level_of_service(
 
 def __exact_isochrones(G, ls_process_order_df, min_edge_length):
     level_of_services = list(ls_process_order_df["ls"].drop_duplicates())
+    print(ls_process_order_df)
+    print(level_of_services)
     level_of_services.reverse()
 
     nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
     remaining_dist_cols = [
         c for c in nodes_gdf.columns if c.startswith("remaining_dist_")
     ]
+    print(remaining_dist_cols)
     level_of_services = [
         ls for ls in level_of_services if f"remaining_dist_{ls}" in remaining_dist_cols
     ]
+    print(level_of_services)
     nodes_gdf[remaining_dist_cols] = nodes_gdf[remaining_dist_cols].fillna(0)
 
     nodes_gdf = nodes_gdf.reset_index()
@@ -236,6 +240,7 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
 
     edges_gdf[f"last_level_of_service_{level_of_services[-1]}_u"] = None
     edges_gdf[f"last_level_of_service_{level_of_services[-1]}_v"] = None
+
     for i in range(len(level_of_services)):
         ls = level_of_services[len(level_of_services) - 1 - i]
         remaining_ls = level_of_services[0 : (len(level_of_services) - i - 1)]
