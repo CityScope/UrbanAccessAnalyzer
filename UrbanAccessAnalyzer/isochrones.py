@@ -7,7 +7,7 @@ from . import graph_processing
 import string
 from itertools import repeat
 from tqdm import tqdm
-
+import warnings
 
 def __distance_matrix_to_processing_order(distance_matrix, level_of_services):
     if isinstance(distance_matrix, list):
@@ -187,19 +187,25 @@ def __set_edge_level_of_service(
 
 def __exact_isochrones(G, ls_process_order_df, min_edge_length):
     level_of_services = list(ls_process_order_df["ls"].drop_duplicates())
-    print(ls_process_order_df)
-    print(level_of_services)
     level_of_services.reverse()
 
     nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
     remaining_dist_cols = [
         c for c in nodes_gdf.columns if c.startswith("remaining_dist_")
     ]
-    print(remaining_dist_cols)
+
     level_of_services = [
         ls for ls in level_of_services if f"remaining_dist_{ls}" in remaining_dist_cols
     ]
-    print(level_of_services)
+
+
+    if len(level_of_services) == 0:
+        warnings.warn(
+            "No nodes have attribute remaining_dist. Probably no isochrones have been generated.",
+            UserWarning
+        )
+        return G
+    
     nodes_gdf[remaining_dist_cols] = nodes_gdf[remaining_dist_cols].fillna(0)
 
     nodes_gdf = nodes_gdf.reset_index()
@@ -412,20 +418,43 @@ def graph(
     service_quality_col=None,
     level_of_services=None,
     min_edge_length=0,
+    max_dist=None
 ):
     if service_quality_col is None:
         points['service_quality_col'] = 1 
+
+    return_points = False
+
+    if "osmid" not in points.columns:
+        H, osmids = graph_processing.add_points_to_graph(
+            points,
+            G,
+            max_dist=max_dist, # Maximum distance from point to graph edge to project the point
+            min_edge_length=min_edge_length # Minimum edge length after adding the new nodes
+        )
+        points['osmid'] = osmids # Add the ids of the nodes in the graph to points
+        return_points = True
+    else:
+        H = G.copy()
+
+    if all(points['osmid'].isna()):  # works if points is a pandas DataFrame
+        warnings.warn("Points are too far away from edges. No isochrones returned.", UserWarning)
+        return G
 
     ls_process_order_df = __distance_matrix_to_processing_order(
         distance_matrix=distance_matrix, level_of_services=level_of_services
     )
     H = __compute_isochrones(
-        G,
+        H,
         points=points,
         ls_process_order_df=ls_process_order_df,
         service_quality_col=service_quality_col,
     )
+
     H = __exact_isochrones(
         H, ls_process_order_df=ls_process_order_df, min_edge_length=min_edge_length
     )
+    if return_points:
+        return H, points
+    
     return H

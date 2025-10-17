@@ -984,14 +984,21 @@ def add_points_to_graph(
     )
 
     if max_dist is None:
-        return new_G, nearest_nodes(
+        points_osmids = nearest_nodes(
             points_orig, new_G
         )  # This is not the most efficient way
     else:
-        return new_G, nearest_nodes(
+        points_osmids = nearest_nodes(
             points_orig, G=new_G, max_dist=min_edge_length + max_dist + 0.01
         )  # This is not the most efficient way
 
+    if all(p is None for p in points_osmids):
+        warnings.warn(
+            "Points are too far away from edges. No isochrones returned.",
+            UserWarning
+        )
+    
+    return new_G, points_osmids
 
 def __multi_ego_graph(
     G,
