@@ -11,9 +11,10 @@ import numpy as np
 import rasterio as rio
 from rasterio.crs import CRS
 import rasterio.warp
-from rasterio.warp import Resampling, calculate_default_transform
+from rasterio.warp import Resampling, calculate_default_transform, transform_bounds
 from rasterio.features import rasterize as rio_rasterize
 from rasterio.windows import from_bounds as window_from_bounds
+from rasterio.transform import from_origin
 import geopandas as gpd
 from pathlib import Path
 from typing import Union, Tuple, Optional, List
@@ -113,6 +114,85 @@ def reproject(
     )
 
     # Fill any remaining src_nodata
+    if src_nodata is not None:
+        dst_array[dst_array == src_nodata] = dst_nodata
+
+    return dst_array, dst_transform, dst_crs
+
+
+def reproject_global(
+    data: np.ndarray,
+    transform: rasterio.Affine,
+    crs: CRS,
+    src_nodata: Optional[Union[int, float]] = None,
+    dst_nodata: Optional[float] = np.nan,
+    dst_crs: Union[CRS,int,str] = 'EPSG:3857',  # Web Mercator by default
+    resolution: float = 1000.0  # pixel size in meters
+) -> Tuple[np.ndarray, rasterio.Affine, CRS]:
+    """
+    Reprojects a raster to a fixed global Web Mercator grid, ensuring perfect alignment
+    with other rasters reprojected this way.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Source raster array.
+    transform : Affine
+        Source affine transform.
+    crs : CRS
+        Source CRS.
+    src_nodata : int|float, optional
+        Source nodata value.
+    dst_nodata : float, optional
+        Destination nodata value.
+    dst_crs : CRS/int/str
+        Target CRS (default EPSG:3857).
+    resolution : float
+        Pixel size in target CRS units (default 1000 meters).
+
+    Returns
+    -------
+    dst_array : np.ndarray
+        Reprojected raster array.
+    dst_transform : Affine
+        Destination affine transform.
+    dst_crs : CRS
+        Destination CRS.
+    """
+    dst_crs = CRS.from_user_input(dst_crs)
+
+    # Compute bounds of source raster in destination CRS
+    left, bottom, right, top = transform_bounds(crs, dst_crs, *rasterio.transform.array_bounds(data.shape[0], data.shape[1], transform))
+
+    # Snap bounds to fixed global grid aligned to 0,0 origin
+    left = np.floor(left / resolution) * resolution
+    bottom = np.floor(bottom / resolution) * resolution
+    right = np.ceil(right / resolution) * resolution
+    top = np.ceil(top / resolution) * resolution
+
+    width = int(np.round((right - left) / resolution))
+    height = int(np.round((top - bottom) / resolution))
+
+    # Create transform aligned to global grid
+    dst_transform = from_origin(left, top, resolution, resolution)
+
+    # Allocate destination array
+    dst_array = np.empty((height, width), dtype=np.float64)
+
+    # Reproject
+    rasterio.warp.reproject(
+        source=data,
+        destination=dst_array,
+        src_transform=transform,
+        src_crs=crs,
+        dst_transform=dst_transform,
+        dst_crs=dst_crs,
+        resampling=Resampling.nearest,
+        src_nodata=src_nodata,
+        dst_nodata=dst_nodata
+    )
+
+    # Replace source nodata with destination nodata if needed
     if src_nodata is not None:
         dst_array[dst_array == src_nodata] = dst_nodata
 

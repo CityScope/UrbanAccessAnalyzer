@@ -15,6 +15,7 @@ import warnings
 from tqdm import tqdm
 from . import raster_utils
 import copy
+import rasterio 
 
 def ls_str_to_int(arr,ref_list):
     # Create a mapping dict from value -> index
@@ -383,6 +384,157 @@ def density_matrix_to_processing_order(density_matrix, level_of_services):
     return melted[["density", "distance", "ls"]]
 
 
+
+def level_of_service_raster(
+        save_path,
+        population,
+        offer,
+        density_matrix:pd.DataFrame,
+        level_of_services:list,
+        min_population:float=0,
+        polygons=None,
+        aoi=None,
+        transform=None,
+        crs=None,
+        resolution=100,
+        street_buffer:float=50,
+        level_of_service_column:str='level_of_service',
+    ):
+    if isinstance(population,str):
+        pop_raster, transform, crs = raster_utils.read_raster(population,aoi=aoi,nodata=0)
+    elif isinstance(population,np.ndarray):
+        if (transform is None) or (crs is None):
+            raise Exception("If providing a population np.ndarray transform and crs are required")
+        
+        pop_raster = copy.copy(population)
+    else:
+        pop_raster, transform, crs = raster_utils.rasterize(population)
+
+    offer = offer.to_crs(offer.estimate_utm_crs())
+    offer.geometry = offer.geometry.simplify(street_buffer/2).buffer(street_buffer,resolution=4)
+    offer_raster = raster_utils.rasterize(
+        gdf=offer,
+        shape=pop_raster,
+        transform=transform,
+        crs=crs,
+        value_column=level_of_service_column,
+        value_order=level_of_services
+    )
+
+    population_buffers = np.unique([0,*density_matrix.columns[1:]])
+    population_buffers = [int(i) for i in population_buffers]
+
+    density_array = []
+    for b in population_buffers:
+        density_b = density(pop_raster,buffer=b,min_value=min_population,transform=transform,crs=crs,return_raster=True)
+        density_array.append(density_b)
+        if b == 0:
+            continue
+        
+        for i in range(len(density_array)):
+            density_array[-1] = np.minimum(density_array[-1], density_array[i])
+
+    process_order = density_matrix_to_processing_order(density_matrix,level_of_services)
+
+    demand_raster = np.zeros(density_array[0].shape,dtype='<U2')
+    for density_i, distance, ls in process_order[['density', 'distance', 'ls']].itertuples(index=False, name=None):
+        index = population_buffers.index(distance)
+        demand_raster[density_array[index] > density_i] = ls
+
+    new_pop_raster, new_transform, new_crs = raster_utils.reproject_global(pop_raster,transform,crs,dst_crs=3857,dst_nodata=0,resolution=resolution)
+    os.makedirs(save_path,exist_ok=True)
+
+    with rasterio.open(
+        os.path.normpath(save_path+"/population.tif"),
+        "w",
+        driver="GTiff",
+        height=new_pop_raster.shape[0],
+        width=new_pop_raster.shape[1],
+        count=1,
+        dtype=new_pop_raster.dtype,
+        crs=new_crs,                 # new CRS from reprojection
+        transform=new_transform,     # aligned transform
+        nodata=0,                    # same as dst_nodata
+        compress="lzw"               # optional: makes file smaller
+    ) as dst:
+        dst.write(new_pop_raster, 1)
+
+    for i in range(len(density_array)):
+        b = population_buffers[i]
+        new_density_raster, new_transform, new_crs = raster_utils.reproject_global(density_array[i],transform,crs,dst_crs=3857,dst_nodata=0,resolution=resolution)
+
+        with rasterio.open(
+            os.path.normpath(save_path+f"/population_density_{b}.tif"),
+            "w",
+            driver="GTiff",
+            height=new_density_raster.shape[0],
+            width=new_density_raster.shape[1],
+            count=1,
+            dtype=new_density_raster.dtype,
+            crs=new_crs,                 # new CRS from reprojection
+            transform=new_transform,     # aligned transform
+            nodata=0,                    # same as dst_nodata
+            compress="lzw"               # optional: makes file smaller
+        ) as dst:
+            dst.write(new_density_raster, 1)
+
+    new_offer_raster, new_transform, new_crs = raster_utils.reproject_global(offer_raster,transform,crs,dst_crs=3857,dst_nodata=0,resolution=resolution)
+
+    with rasterio.open(
+        os.path.normpath(save_path+f"/offer.tif"),
+        "w",
+        driver="GTiff",
+        height=new_offer_raster.shape[0],
+        width=new_offer_raster.shape[1],
+        count=1,
+        dtype=new_offer_raster.dtype,
+        crs=new_crs,                 # new CRS from reprojection
+        transform=new_transform,     # aligned transform
+        nodata="",                    # same as dst_nodata
+        compress="lzw"               # optional: makes file smaller
+    ) as dst:
+        dst.write(new_offer_raster, 1)
+
+    new_demand_raster, new_transform, new_crs = raster_utils.reproject_global(demand_raster,transform,crs,dst_crs=3857,dst_nodata=0,resolution=resolution)
+
+    with rasterio.open(
+        os.path.normpath(save_path+f"/demand.tif"),
+        "w",
+        driver="GTiff",
+        height=new_demand_raster.shape[0],
+        width=new_demand_raster.shape[1],
+        count=1,
+        dtype=new_demand_raster.dtype,
+        crs=new_crs,                 # new CRS from reprojection
+        transform=new_transform,     # aligned transform
+        nodata="",                    # same as dst_nodata
+        compress="lzw"               # optional: makes file smaller
+    ) as dst:
+        dst.write(new_demand_raster, 1)
+
+    difference = ls_str_to_int(new_demand_raster,level_of_services) - ls_str_to_int(new_offer_raster,level_of_services)
+
+    with rasterio.open(
+        os.path.normpath(save_path+f"/difference.tif"),
+        "w",
+        driver="GTiff",
+        height=difference.shape[0],
+        width=difference.shape[1],
+        count=1,
+        dtype=difference.dtype,
+        crs=new_crs,                 # new CRS from reprojection
+        transform=new_transform,     # aligned transform
+        nodata=None,                    # same as dst_nodata
+        compress="lzw"               # optional: makes file smaller
+    ) as dst:
+        dst.write(difference, 1)
+
+    return None
+
+
+
+
+
 def level_of_service(
         population,
         offer,
@@ -393,7 +545,7 @@ def level_of_service(
         aoi=None,
         transform=None,
         crs=None,
-        resolution=None,
+        resolution=100,
         street_buffer:float=50,
         level_of_service_column:str='level_of_service',
     ):
