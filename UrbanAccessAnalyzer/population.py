@@ -459,6 +459,7 @@ def level_of_service_raster(
     ) as dst:
         dst.write(new_pop_raster, 1)
 
+
     for i in range(len(density_array)):
         b = population_buffers[i]
         new_density_raster, new_transform, new_crs = raster_utils.reproject_global(density_array[i],transform,crs,dst_crs=3857,dst_nodata=0,resolution=resolution)
@@ -478,7 +479,8 @@ def level_of_service_raster(
         ) as dst:
             dst.write(new_density_raster, 1)
 
-    new_offer_raster, new_transform, new_crs = raster_utils.reproject_global(offer_raster,transform,crs,dst_crs=3857,dst_nodata=0,resolution=resolution)
+    offer_raster = ls_str_to_int(offer_raster,level_of_services) 
+    new_offer_raster, new_transform, new_crs = raster_utils.reproject_global(offer_raster,transform,crs,dst_crs=3857,dst_nodata=len(level_of_services),resolution=resolution)
 
     with rasterio.open(
         os.path.normpath(save_path+f"/offer.tif"),
@@ -490,12 +492,13 @@ def level_of_service_raster(
         dtype=new_offer_raster.dtype,
         crs=new_crs,                 # new CRS from reprojection
         transform=new_transform,     # aligned transform
-        nodata="",                    # same as dst_nodata
+        nodata=len(level_of_services), # same as dst_nodata
         compress="lzw"               # optional: makes file smaller
     ) as dst:
         dst.write(new_offer_raster, 1)
 
-    new_demand_raster, new_transform, new_crs = raster_utils.reproject_global(demand_raster,transform,crs,dst_crs=3857,dst_nodata=0,resolution=resolution)
+    offer_raster = ls_str_to_int(demand_raster,level_of_services) 
+    new_demand_raster, new_transform, new_crs = raster_utils.reproject_global(demand_raster,transform,crs,dst_crs=3857,dst_nodata=len(level_of_services),resolution=resolution)
 
     with rasterio.open(
         os.path.normpath(save_path+f"/demand.tif"),
@@ -507,12 +510,12 @@ def level_of_service_raster(
         dtype=new_demand_raster.dtype,
         crs=new_crs,                 # new CRS from reprojection
         transform=new_transform,     # aligned transform
-        nodata="",                    # same as dst_nodata
+        nodata=len(level_of_services),                    # same as dst_nodata
         compress="lzw"               # optional: makes file smaller
     ) as dst:
         dst.write(new_demand_raster, 1)
 
-    difference = ls_str_to_int(new_demand_raster,level_of_services) - ls_str_to_int(new_offer_raster,level_of_services)
+    difference = new_demand_raster - new_offer_raster
 
     with rasterio.open(
         os.path.normpath(save_path+f"/difference.tif"),
