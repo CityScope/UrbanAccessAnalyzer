@@ -497,7 +497,7 @@ def level_of_service_raster(
     ) as dst:
         dst.write(new_offer_raster, 1)
 
-    offer_raster = ls_str_to_int(demand_raster,level_of_services) 
+    demand_raster = ls_str_to_int(demand_raster,level_of_services) 
     new_demand_raster, new_transform, new_crs = raster_utils.reproject_global(demand_raster,transform,crs,dst_crs=3857,dst_nodata=len(level_of_services),resolution=resolution)
 
     with rasterio.open(
