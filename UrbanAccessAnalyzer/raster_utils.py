@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import Union
 import numpy as np
 import shapely
-import rasterio as rio
 from rasterio.transform import xy, Affine, array_bounds
 from pyproj import Transformer
 import warnings 
@@ -14,6 +13,7 @@ import rasterio.warp
 from rasterio.warp import Resampling, calculate_default_transform, transform_bounds
 from rasterio.features import rasterize as rio_rasterize
 from rasterio.windows import from_bounds as window_from_bounds
+from rasterio.merge import merge as rio_merge
 from rasterio.transform import from_origin
 import geopandas as gpd
 from pathlib import Path
@@ -25,6 +25,52 @@ from skimage.morphology import disk # For density_raster kernel
 
 # Define a common WGS84 CRS object for convenience
 WGS84_CRS = CRS.from_epsg(4326)
+
+
+def validate_crs(src:rio.io.DatasetReader|rio.io.DatasetWriter|dict|CRS|str|int):
+    import re
+    if type(src) is dict:
+        crs = src['crs']
+    elif type(src) is CRS:
+        crs = src
+    elif type(src) is str:
+        crs = CRS.from_string(src)
+    elif type(src) is int:
+        crs = CRS.from_epsg(src)
+    else:
+        try:
+            crs = src.crs 
+        except:
+            raise Exception(f"src type {type(src)} not accepted: {src}")
+
+    warnings.filterwarnings(
+        "ignore",
+        message=re.escape(
+            "You will likely lose important projection information when converting to a PROJ string from another format. See: https://proj.org/faq.html#what-is-the-best-format-for-describing-coordinate-reference-systems"
+        ),
+        category=UserWarning
+    )
+    if len(crs.to_proj4()) == 0:
+        crs_str = crs.to_wkt()
+        
+        if "LOCAL_CS" in crs_str:
+            if "ETRS89-extended / LAEA Europe" in crs_str:
+                crs = CRS.from_epsg(3035)
+
+                if (type(src) == rio.io.DatasetReader) and (src.mode != 'r'):
+                    src.crs = crs
+
+                return crs
+            # Add more mappings as needed
+            # elif "Another projection" in crs_str:
+            #     return CRS.from_epsg(some_epsg_code)
+            else:
+                raise ValueError("Unknown LOCAL_CS definition; manual intervention needed.")
+        else:
+            raise ValueError("CRS is invalid, but not due to LOCAL_CS.")
+    else:
+        return crs.to_epsg() # to_proj4()
+    
 
 def extract_affine_params(transform: Union[Affine, np.ndarray]) -> Tuple[float, float, float, float, float, float]:
     """
@@ -267,7 +313,10 @@ def raster_crop(
                 raise MemoryError(f"AOI too large: {window.width}x{window.height} pixels")
 
             # Read cropped, grid-aligned data
-            current_data = _src.read(1, window=window)
+            current_data = _src.read(1, window=window, masked=True)
+            current_data = np.where(current_data.mask, current_src_nodata, current_data.data)
+            current_data[np.isnan(current_data)] = nodata
+            current_data[current_data == current_src_nodata] = nodata
             current_transform = _src.window_transform(window)
 
         # Optional: reproject to UTM or other CRS
@@ -276,7 +325,7 @@ def raster_crop(
                 current_data,
                 current_transform,
                 current_crs,
-                src_nodata=current_src_nodata,
+                src_nodata=nodata,
                 dst_nodata=nodata,
                 dst_crs='utm'
             )
@@ -640,3 +689,40 @@ def buffer_mean(
 
         pop_density = convolved_raster / area_covered_by_kernel
         return pop_density
+
+
+def merge(input_paths, bounds: gpd.GeoSeries = None, method='max'):
+    # Open all input GeoTIFF files
+    if isinstance(input_paths[0], str):
+        src = [rio.open(path) for path in input_paths]
+    else:
+        src = input_paths
+
+    crs = validate_crs(src[0])
+
+    # Prepare bounds if given
+    merge_bounds = tuple(bounds.to_crs(crs).total_bounds) if bounds is not None else None
+
+    # Merge using built-in max method
+    mosaic, out_trans = rio_merge(
+        src,
+        bounds=merge_bounds,
+        method=method,
+        masked=True          # converts nodata to masked automatically
+    )
+
+    # # Handle single-band color palette
+    # if (src[0].count == 1) and (src[0].colorinterp[0] == rio.enums.ColorInterp.palette):
+    #     mosaic = colormap_to_rgb(mosaic, src[0].colormap(1))
+
+    for s in src:
+        s.close()
+
+    # Get raster dimensions
+    _, width, height = mosaic.shape
+
+    # Calculate bounds using array_bounds
+    # img_bounds = rio.transform.array_bounds(width, height, out_trans)
+    # img_bounds = gpd.GeoSeries(shapely.geometry.box(*img_bounds), crs=crs)
+
+    return mosaic, out_trans, crs
