@@ -279,20 +279,14 @@ def raster_crop(
         else:
             # Unify geometry
             if isinstance(aoi, gpd.GeoDataFrame):
-                geom_to_crop = aoi.geometry.union_all()
-                aoi_crs = aoi.crs
+                geom_to_crop = aoi.geometry.to_crs(current_crs).union_all()
             elif isinstance(aoi, gpd.GeoSeries):
-                geom_to_crop = aoi.union_all()
-                aoi_crs = aoi.crs
+                geom_to_crop = aoi.to_crs(current_crs).union_all()
             else:
                 raise TypeError("AOI must be a GeoDataFrame or GeoSeries.")
 
-            # Reproject AOI to raster CRS
-            if aoi_crs != current_crs:
-                geom_to_crop = gpd.GeoSeries([geom_to_crop], crs=aoi_crs).to_crs(current_crs).iloc[0]
-
             if geom_to_crop.is_empty:
-                raise ValueError("AOI is empty after reprojecting to raster CRS.")
+                raise ValueError("AOI is empty")
 
             # Clip AOI bounds to raster extent
             aoi_bounds = geom_to_crop.bounds
@@ -358,14 +352,14 @@ def read_raster(path: Union[str, Path], aoi: Optional[Union[gpd.GeoDataFrame, gp
     -------
     Tuple[np.ndarray, Affine, CRS]
         A tuple containing:
-        - population (np.ndarray): The raster data (cropped, reprojected, float64, nan for nodata).
+        - data (np.ndarray): The raster data (cropped, reprojected, float64, nan for nodata).
         - transform (Affine): The affine transform of the output raster.
         - crs (CRS): The CRS of the output raster (UTM if source was geographic).
     """
     # raster_crop now handles reprojection, cropping, and consistent nodata/dtype output
-    population, transform, crs, _, _ = raster_crop(path, aoi, nodata=nodata, projected=projected)
+    data, transform, crs, _, _ = raster_crop(path, aoi, nodata=nodata, projected=projected)
     
-    return population, transform, crs
+    return data, transform, crs
 
 
 def vectorize(

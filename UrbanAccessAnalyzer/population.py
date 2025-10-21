@@ -411,7 +411,16 @@ def level_of_service_raster(
         pop_raster, transform, crs = raster_utils.rasterize(population)
 
     offer = offer.to_crs(offer.estimate_utm_crs())
-    offer.geometry = offer.geometry.simplify(street_buffer/2).buffer(street_buffer,resolution=4)
+
+    geom_types = offer.geometry.geom_type.unique()
+
+    if set(geom_types).issubset({'LineString', 'MultiLineString'}):
+        # All geometries are line types
+        offer.geometry = offer.geometry.simplify(street_buffer / 2).buffer(street_buffer, resolution=4)
+
+    elif not set(geom_types).issubset({'Polygon', 'MultiPolygon'}):
+        raise ValueError(f"Mixed geometry types (Poygons and Lines) detected for offer geometry: {geom_types}")
+
     offer_raster = raster_utils.rasterize(
         gdf=offer,
         shape=pop_raster,

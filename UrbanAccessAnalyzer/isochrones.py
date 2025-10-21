@@ -1,4 +1,5 @@
 import geopandas as gpd
+import shapely
 import pandas as pd
 import numpy as np
 import osmnx as ox
@@ -458,3 +459,57 @@ def graph(
         return H, points
     
     return H
+
+
+
+def buffers(
+    points, distance_matrix, level_of_services, service_quality_col
+):
+    if points.crs.is_geographic:
+        points = points.to_crs(points.estimate_utm_crs())
+
+    if service_quality_col is None:
+        points["__service_quality"] = 1
+        service_quality_col = "__service_quality"
+
+    ls_process_order_df = __distance_matrix_to_processing_order(
+        distance_matrix=distance_matrix, level_of_services=level_of_services
+    )
+
+    level_of_services_list = list(ls_process_order_df["ls"].drop_duplicates())
+    level_of_services_list.reverse()
+    buffers = {
+        ls:[] for ls in level_of_services_list
+    }
+    for quality, distance, level_of_service in tqdm(
+        ls_process_order_df[["service_quality", "distance", "ls"]].itertuples(
+            index=False, name=None
+        ),
+        total=len(ls_process_order_df),
+    ):
+        if isinstance(quality, int):
+            quality = [quality]
+
+        selected_points = points[points[service_quality_col].isin(quality)]
+        selected_points = selected_points.geometry.union_all().buffer(distance,resolution=4)
+        buffers[level_of_service].append(selected_points)
+
+    rows = []
+    total_geometry = None
+    i=0
+    for level_of_service in level_of_services_list:
+        i+=1
+        geom = shapely.unary_union(buffers[level_of_service])
+        if total_geometry is None:
+            total_geometry = geom
+            row_geom = geom
+        else:
+            row_geom = shapely.difference(geom,total_geometry)
+            total_geometry = shapely.unary_union([total_geometry,geom])
+
+        rows.append({'level_of_service': level_of_service, 'level_of_service_int': i, 'geometry': row_geom})
+
+
+    result = gpd.GeoDataFrame(rows, crs=points.crs)
+    return result.sort_values("level_of_service_int")
+
