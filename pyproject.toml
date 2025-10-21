@@ -25,6 +25,10 @@ dependencies = [
     "scikit-image>=0.25.2",
     "shapely>=2.1.1",
     "tqdm>=4.0.0",
+    "streamlit>=1.50.0",
+    "matplotlib>=3.10.7",
+    "mapclassify>=2.10.0",
+    "folium>=0.20.0",
 ]
 
 [dependency-groups]
