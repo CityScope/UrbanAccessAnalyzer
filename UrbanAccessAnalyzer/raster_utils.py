@@ -22,6 +22,8 @@ from pyproj import Transformer
 import math
 from scipy.ndimage import convolve
 from skimage.morphology import disk # For density_raster kernel
+from rasterio.mask import mask
+
 
 # Define a common WGS84 CRS object for convenience
 WGS84_CRS = CRS.from_epsg(4326)
@@ -251,11 +253,6 @@ def raster_crop(
     nodata: float = np.nan,
     projected: bool = False
 ) -> Tuple[np.ndarray, Affine, CRS, int, int]:
-    """
-    Crop a GeoTIFF raster to the AOI and return data, transform, CRS, height, width.
-    Efficient: only reads the raster window covering AOI (does not load full raster).
-    Ensures pixel grid alignment and prevents over-reads.
-    """
     _src = None
     if isinstance(src_input, (str, Path)):
         file_path = Path(src_input)
@@ -269,49 +266,40 @@ def raster_crop(
 
     try:
         current_crs = _src.crs
-        current_src_nodata = _src.nodata
+        current_src_nodata = _src.nodata if _src.nodata is not None else np.nan
 
         if aoi is None:
             # Only if no AOI: read full raster (may be huge!)
-            current_data = _src.read(1)
+            current_data = _src.read(1, masked=True)
+            current_data = current_data.astype('float64')
+            current_data = np.where(current_data.mask, nodata, current_data.data)
             current_transform = _src.transform
-
         else:
             # Unify geometry
             if isinstance(aoi, gpd.GeoDataFrame):
-                geom_to_crop = aoi.geometry.to_crs(current_crs).union_all()
+                geom_to_crop = aoi.geometry.to_crs(current_crs)
             elif isinstance(aoi, gpd.GeoSeries):
-                geom_to_crop = aoi.to_crs(current_crs).union_all()
+                geom_to_crop = aoi.to_crs(current_crs)
             else:
                 raise TypeError("AOI must be a GeoDataFrame or GeoSeries.")
 
-            if geom_to_crop.is_empty:
+            if geom_to_crop.is_empty.any():
                 raise ValueError("AOI is empty")
 
-            # Clip AOI bounds to raster extent
-            aoi_bounds = geom_to_crop.bounds
-            raster_bounds = _src.bounds
-            clipped_bounds = (
-                max(aoi_bounds[0], raster_bounds.left),
-                max(aoi_bounds[1], raster_bounds.bottom),
-                min(aoi_bounds[2], raster_bounds.right),
-                min(aoi_bounds[3], raster_bounds.top),
+            # Convierte la geometría a una lista de shapes
+            shapes = [geom for geom in geom_to_crop]
+
+            # Usa rasterio.mask.mask para recortar según la geometría exacta del AOI
+            current_data, current_transform = mask(
+                _src,
+                shapes=shapes,
+                crop=True,
+                filled=False,
+                nodata=current_src_nodata,
             )
-
-            # Compute window snapped to pixel grid
-            window = window_from_bounds(*clipped_bounds, transform=_src.transform)
-            window = window.round_offsets(op="floor").round_lengths(op="ceil")
-
-            # Sanity check: prevent huge reads
-            if window.width * window.height > 2_500_000_000:  # ~2GB float32
-                raise MemoryError(f"AOI too large: {window.width}x{window.height} pixels")
-
-            # Read cropped, grid-aligned data
-            current_data = _src.read(1, window=window, masked=True)
-            current_data = np.where(current_data.mask, current_src_nodata, current_data.data)
-            current_data[np.isnan(current_data)] = nodata
-            current_data[current_data == current_src_nodata] = nodata
-            current_transform = _src.window_transform(window)
+            current_data = current_data[0]  # Toma la primera banda
+            current_data = current_data.astype('float64')
+            current_data = np.where(current_data.mask, nodata, current_data.data)
 
         # Optional: reproject to UTM or other CRS
         if projected:
@@ -330,10 +318,10 @@ def raster_crop(
 
         height, width = data.shape
         return data, transform, crs, height, width
-
     finally:
         if isinstance(src_input, (str, Path)) and _src is not None:
             _src.close()
+
 
 def read_raster(path: Union[str, Path], aoi: Optional[Union[gpd.GeoDataFrame, gpd.GeoSeries]] = None, nodata: float = np.nan, projected:bool=False) -> Tuple[np.ndarray, Affine, CRS]:
     """

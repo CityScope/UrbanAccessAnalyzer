@@ -1,6 +1,6 @@
 import sys
-sys.path.append('/home/miguel/Documents/Proyectos/PTLevelofService/gtfs/pyGTFSHandler')
-sys.path.append('/home/miguel/Documents/Proyectos/PTLevelofService/accessibility/UrbanAccessAnalyzer')
+sys.path.append('/home/jshz/pyGTFS_NUEVO/pyGTFSHandler')
+sys.path.append('/home/jshz/UrbanAccessAnalyzer')
 
 import os
 from datetime import datetime, date, timedelta, time
@@ -36,7 +36,7 @@ st.set_page_config(page_title="Public Transport Level Of Service", layout="wide"
 
 START_HOUR, END_HOUR = 8, 20
 BUFFER_METERS = 3500
-WORK_DIR = "/home/miguel/Documents/Proyectos/PTLevelofService/accessibility/UrbanAccessAnalyzer/no_sync"
+WORK_DIR = "/home/jshz/UrbanAccessAnalyzer/no_sync"
 USER_AGENT = "urban-access-analyzer/1.0"
 MOBILITY_DB_REFRESH_TOKEN = 'AMf-vByYiwMAni1pw6yTpwgwwYFc8HR4y0zUKZGPT4sjJ0wUrIXOfVxF1KotRIvEgAseaaNheL8YczJiCILb6o2PUh-8zjA-qQURzEc8tELlwFiDopMoqJnkDf13AqNaGGnnzTDmYM20AWEquUxcYFAB8Q3e5rI2DcTBSQuiUdHL8bi48xmUJk3tayHpnoicoppi_evDcWYODwOJFcwnta3K7f718w7R2JRM0zDEOYw7nI7thrQa9462BENdpv8zv8mEbBssEa189k6YcV__sQAZlng2EcsCGA'
 
@@ -469,20 +469,7 @@ if st.session_state.gtfs_ready:
         
         if st.session_state.level_of_service_gdf is not None:
             
-            # MODIFICATION 2: START POPULATION DOWNLOAD AND HANDLE FEEDBACK OUTSIDE CACHE
-            if st.session_state.population_file is None:
-                st.subheader("Population Data Retrieval")
-                with st.status("Checking cache or starting WorldPop 100m download...", expanded=True) as status:
-                    pop_file, error = get_population_file_cached(st.session_state.aoi_download, population_folder)
-                    
-                    if pop_file:
-                        st.session_state.population_file = pop_file
-                        status.update(label=f"✅ WorldPop data ready: {os.path.basename(pop_file)}", state="complete", expanded=False)
-                    else:
-                        status.update(label=f"❌ Failed to get WorldPop data.", state="error", expanded=True)
-                        st.error(f"Population download failed: {error}")
-                        st.session_state.population_file = None
-            # END MODIFICATION 2
+           
 
             # Load GDFs from session state
             gdf = st.session_state.service_quality_gdf.copy()
@@ -534,17 +521,17 @@ if st.session_state.gtfs_ready:
             
             folium.Marker([addr["lat"],addr["lon"]],icon=folium.Icon(color='red',icon='home')).add_to(m)
 
-            legend_html = """
-            <div style="position: fixed; bottom: 50px; left: 50px; width: 160px; height: 250px; 
-                        border:2px solid grey; z-index:9999; font-size:14px; background:white; padding:10px;">
-            <b>Quality</b><br>
-            <i style='color:#000000; font-weight:bold'> No service </i><br>
-            """
-            for i in range(1,13):
-                hexc = matplotlib.colors.rgb2hex(cmap_blue((i-1)/(12-1)))
-                legend_html += f"<i style='color:{hexc}; font-weight:bold'> {to_roman(i)} </i><br>"
-            legend_html += "</div>"
-            m.get_root().html.add_child(folium.Element(legend_html))
+            # legend_html = """
+            # <div style="position: fixed; bottom: 50px; left: 50px; width: 160px; height: 250px; 
+            #             border:2px solid grey; z-index:9999; font-size:14px; background:white; padding:10px;">
+            # <b>Quality</b><br>
+            # <i style='color:#000000; font-weight:bold'> No service </i><br>
+            # """
+            # for i in range(1,13):
+            #     hexc = matplotlib.colors.rgb2hex(cmap_blue((i-1)/(12-1)))
+            #     legend_html += f"<i style='color:{hexc}; font-weight:bold'> {to_roman(i)} </i><br>"
+            # legend_html += "</div>"
+            # m.get_root().html.add_child(folium.Element(legend_html))
 
             st_folium(m,width=1200,height=600)
 
@@ -558,8 +545,8 @@ if st.session_state.level_of_service_gdf is not None:
     # MODIFICATION 3: Use the file path from session state, populated in Step 2.
     population_file = st.session_state.population_file
 
-    if population_file is None:
-        st.info("Population data download required for raster analysis is in progress or failed. Please check Step 2.")
+    # if population_file is None:
+    #     st.info("Population data download required for raster analysis is in progress or failed. Please check Step 2.")
         
     run_raster_clicked = st.button("Generate Demand & Offer Rasters", key="run_raster_btn")
     
@@ -577,6 +564,22 @@ if st.session_state.level_of_service_gdf is not None:
         
         if run_raster_clicked and not st.session_state.raster_ready:
             # --- Run Calculation ---
+             # MODIFICATION 2: START POPULATION DOWNLOAD AND HANDLE FEEDBACK OUTSIDE CACHE
+            if st.session_state.population_file is None:
+                st.subheader("Population Data Retrieval")
+                with st.status("Checking cache or starting WorldPop 100m download...", expanded=True) as status:
+                    pop_file, error = get_population_file_cached(st.session_state.aoi_download, population_folder)
+                    
+                    if pop_file:
+                        st.session_state.population_file = pop_file
+                        status.update(label=f"✅ WorldPop data ready: {os.path.basename(pop_file)}", state="complete", expanded=False)
+                    else:
+                        status.update(label=f"❌ Failed to get WorldPop data.", state="error", expanded=True)
+                        st.error(f"Population download failed: {error}")
+                        st.session_state.population_file = None
+        
+            # END MODIFICATION 2
+            population_file = st.session_state.population_file
             if population_file is None:
                 st.warning("Cannot proceed: Population data is not yet available.")
             else:
@@ -624,7 +627,7 @@ if st.session_state.level_of_service_gdf is not None:
                 
                 try:
                     # Read raster data
-                    data, transform, crs = raster_utils.read_raster(filepath, aoi=aoi_geom, projected=True) 
+                    data, transform, crs = raster_utils.read_raster(filepath, aoi=aoi_geom, projected=False) 
 
                     if data.size == 0: continue
                     
@@ -672,7 +675,7 @@ if st.session_state.level_of_service_gdf is not None:
                         # Defensive Population Reading
                         if pop_data_cache is None:
                             pop_filepath = os.path.join(level_of_service_path, "population_density_0.tif")
-                            pop_data_raw, _, _ = raster_utils.read_raster(pop_filepath, aoi=aoi_geom, projected=True)
+                            pop_data_raw, _, _ = raster_utils.read_raster(pop_filepath, aoi=aoi_geom, projected=False)
                             pop_data_float = pop_data_raw.astype(np.float64, copy=True) 
                             # Re-apply robust masking to the cache if needed
                             pop_data_cache = np.ma.masked_array(pop_data_float, mask=~np.isfinite(pop_data_float))
