@@ -1,6 +1,15 @@
+"""
+TODO: raster map does not have legends 
+TODO: level of service map when clicking one level of service polygon level of service should appear
+TODO: population matrix should not be shown
+TODO: Map is reloading all the time
+TODO: Basic statistics population with each level of service and population not meeting requirements
+"""
+
+
 import sys
-sys.path.append('/home/jshz/pyGTFS_NUEVO/pyGTFSHandler')
-sys.path.append('/home/jshz/UrbanAccessAnalyzer')
+sys.path.append('/home/miguel/Documents/Proyectos/PTLevelofService/gtfs/pyGTFSHandler')
+sys.path.append('/home/miguel/Documents/Proyectos/PTLevelofService/accessibility/UrbanAccessAnalyzer')
 
 import os
 from datetime import datetime, date, timedelta, time
@@ -19,6 +28,8 @@ import rasterio
 import osmnx as ox 
 import pyproj
 import io, base64
+import re
+import branca
 
 from pyGTFSHandler.feed import Feed
 from pyGTFSHandler.downloaders.mobility_database import (
@@ -35,8 +46,9 @@ import UrbanAccessAnalyzer.raster_utils as raster_utils
 st.set_page_config(page_title="Public Transport Level Of Service", layout="wide")
 
 START_HOUR, END_HOUR = 8, 20
-BUFFER_METERS = 3500
-WORK_DIR = "/home/jshz/UrbanAccessAnalyzer/no_sync"
+BUFFER_LOS = 2000
+BUFFER_POP = 3000
+WORK_DIR = "/home/miguel/Documents/Proyectos/PTLevelofService/accessibility/UrbanAccessAnalyzer/no_sync"
 USER_AGENT = "urban-access-analyzer/1.0"
 MOBILITY_DB_REFRESH_TOKEN = 'AMf-vByYiwMAni1pw6yTpwgwwYFc8HR4y0zUKZGPT4sjJ0wUrIXOfVxF1KotRIvEgAseaaNheL8YczJiCILb6o2PUh-8zjA-qQURzEc8tELlwFiDopMoqJnkDf13AqNaGGnnzTDmYM20AWEquUxcYFAB8Q3e5rI2DcTBSQuiUdHL8bi48xmUJk3tayHpnoicoppi_evDcWYODwOJFcwnta3K7f718w7R2JRM0zDEOYw7nI7thrQa9462BENdpv8zv8mEbBssEa189k6YcV__sQAZlng2EcsCGA'
 
@@ -49,12 +61,12 @@ LOS_GRADES = ['A1', 'A2', 'A3', 'B1', 'B2', 'B3', 'C1', 'C2', 'C3', 'D', 'E', 'F
 
 # Custom colors for Distance/Density matrices
 GRADE_COLOR_MAP = {
-    'A': ['#ccffcc', '#66ff66', '#00cc00'], # Light to Dark Green
-    'B': ['#ffffcc', '#ffff66', '#cccc00'], # Light to Dark Yellow
-    'C': ['#ffcccc', '#ff6666', '#cc0000'], # Light to Dark Red
-    'D': ['#ffb3e4'], # Light Pink
-    'E': ['#d9b3ff'], # Light Purple
-    'F': ['#b3d9ff'], # Light Blue
+    'A': ['#b7e4c7', '#74c69d', '#2d6a4f'],  # Light mint → medium → deep green
+    'B': ['#fff3b0', '#ffd60a', '#e0a800'],  # Light buttery → bright gold → rich amber
+    'C': ['#ffd6a5', '#ff924c', '#d9480f'],  # Light peach → medium orange → deep burnt orange
+    'D': ['#ff6b6b'],                        # Strong red (poor)
+    'E': ['#b983ff'],                        # Purple (very poor)
+    'F': ["#1F00D2"],                        # Gray (fail)
     None: ['transparent']
 }
 
@@ -85,7 +97,7 @@ density_matrix_display_data = pd.DataFrame(
 defaults = {
     "confirmed_address": None, "last_input": "", "gtfs_ready": False,
     "service_quality_gdf": None, "gtfs": None,
-    "aoi": None, "aoi_download": None, "geo": None, "raster_ready": False,
+    "aoi": None, "aoi_download": None, "aoi_pop_download": None, "geo": None, "raster_ready": False,
     "level_of_service_gdf": None, "stop_quality_gdf_cropped": None,
     "population_file": None, # ADDED: To store cached population file path
 }
@@ -325,7 +337,8 @@ if st.session_state.confirmed_address is None:
                         aoi = get_city_geometry(disp) 
                         st.session_state.geo = geo
                         st.session_state.aoi = aoi
-                        st.session_state.aoi_download = aoi.to_crs(aoi.estimate_utm_crs()).buffer(BUFFER_METERS)
+                        st.session_state.aoi_download = aoi.to_crs(aoi.estimate_utm_crs()).buffer(BUFFER_LOS)
+                        st.session_state.aoi_pop_download = aoi.to_crs(aoi.estimate_utm_crs()).buffer(BUFFER_POP)
                     except Exception as e:
                         st.warning(f"AOI could not be loaded: {e}")
                     st.rerun() # Rerun to stabilize confirmed address display
@@ -397,7 +410,7 @@ if st.session_state.confirmed_address:
 if st.session_state.gtfs_ready:
     gtfs = st.session_state.gtfs
     
-    st.header("1. Service Intensity Overview")
+    st.header("1. Amount of transit service per day")
     with st.spinner("Calculating service intensity..."):
         s_int = gtfs.get_service_intensity_in_date_range(by_feed=True)
     try:
@@ -405,10 +418,10 @@ if st.session_state.gtfs_ready:
     except Exception as e:
         st.error(f"Could not plot service intensity: {e}")
 
-    st.header("2. Detailed Service Quality & Coverage")
+    st.header("2. Level of Service (A-F)")
     
     chosen_date = st.date_input("Date for Analysis", value=date.today())
-    run_quality_clicked = st.button("Analyze Quality & Buffers", key="run_quality_btn")
+    run_quality_clicked = st.button("Next", key="run_quality_btn")
 
     # Determine if we should show results (either clicked button or results already exist)
     show_step2_results = run_quality_clicked or st.session_state.service_quality_gdf is not None
@@ -419,7 +432,7 @@ if st.session_state.gtfs_ready:
         col_svc, col_dist = st.columns(2)
         
         with col_svc:
-            st.subheader("Service Levels (Frequency vs Time)")
+            st.subheader("Service quality (Frequency vs Mode)")
             svc = processing_helper.SERVICE_MATRIX.copy()
             if 'tram' in svc.columns: svc = svc.rename(columns={'tram': 'tram/BRT'})
             if "interval" in svc.columns: svc = svc.rename(columns={"interval":"Frequency"})
@@ -432,7 +445,7 @@ if st.session_state.gtfs_ready:
             st.markdown(svc.to_html(index=False, escape=False), unsafe_allow_html=True)
 
         with col_dist:
-            st.subheader("Distance Matrix (Quality vs Distance)")
+            st.subheader("Level of service (Quality vs Distance)")
             svc_dist = processing_helper.DISTANCE_MATRIX.copy()
             svc_dist = svc_dist.rename(columns={"service_quality": "Service Quality"})
             styled_dist_matrix = color_distance_matrix(svc_dist)
@@ -468,32 +481,44 @@ if st.session_state.gtfs_ready:
         # --- Display Map and Trigger Background Download ---
         
         if st.session_state.level_of_service_gdf is not None:
-            
-           
 
             # Load GDFs from session state
             gdf = st.session_state.service_quality_gdf.copy()
             
-            st.subheader("Coverage Map (Stop Service Quality and Buffer Coverage)")
+            st.subheader("Level of service of the offered public transport")
             
             aoi = st.session_state.aoi.to_crs(gdf.crs)
             gdf_cropped = gpd.clip(gdf, aoi)
             st.session_state.stop_quality_gdf_cropped = gdf_cropped
 
-            if gdf_cropped.crs is None: gdf_cropped = gdf_cropped.set_crs("EPSG:4326")
-            else: gdf_cropped = gdf_cropped.to_crs("EPSG:4326")
+            if gdf_cropped.crs is None: 
+                gdf_cropped = gdf_cropped.set_crs("EPSG:4326")
+            else: 
+                gdf_cropped = gdf_cropped.to_crs("EPSG:4326")
 
             col_map_rename = {
-                f"service_quality_{START_HOUR}h_{END_HOUR}h":"service_quality",
-                f"interval_{START_HOUR}h_{END_HOUR}h":"frequency",
-                f"route_names_{START_HOUR}h_{END_HOUR}h":"route_names",
-                f"route_type_{START_HOUR}h_{END_HOUR}h":"route_type"
+                f"service_quality_{START_HOUR}h_{END_HOUR}h": "service_quality",
+                f"interval_{START_HOUR}h_{END_HOUR}h": "frequency",
+                f"route_names_{START_HOUR}h_{END_HOUR}h": "route_names",
+                #f"route_type_{START_HOUR}h_{END_HOUR}h": "route_type"
             }
             gdf_cropped = gdf_cropped.rename(columns=col_map_rename)
             gdf_cropped["service_quality"] = gdf_cropped["service_quality"].fillna(0).astype(int)
-            gdf_cropped["roman"] = gdf_cropped["service_quality"].apply(lambda x: to_roman(x) if x>0 else "No service")
+            gdf_cropped["roman"] = gdf_cropped["service_quality"].apply(lambda x: to_roman(x) if x > 0 else "No service")
 
-            m = folium.Map(location=[addr["lat"],addr["lon"]],zoom_start=13, tiles="CartoDB Positron")
+            # --- Helper function to clean stop info ---
+            def clean_stop_value(val):
+                """Convert Series/list/string to clean string for popup"""
+                if isinstance(val, (pd.Series, np.ndarray)):
+                    val = list(val)
+                if isinstance(val, list):
+                    cleaned = [re.sub(r'_file_\d+', '', str(x)) for x in val if x is not None and str(x) != 'nan']
+                    return ", ".join(cleaned)
+                if isinstance(val, str):
+                    return re.sub(r'_file_\d+', '', val)
+                return ""
+
+            m = folium.Map(location=[addr["lat"], addr["lon"]], zoom_start=13, tiles="CartoDB Positron")
             
             # Add LOS Buffer Layer 
             los_gdf = st.session_state.level_of_service_gdf.to_crs(4326)
@@ -507,40 +532,49 @@ if st.session_state.gtfs_ready:
                 tooltip=False, popup=False
             ).add_to(m)
 
-            # Add AOI boundary, stops, and legend
-            folium.GeoJson(st.session_state.aoi.to_crs("EPSG:4326").geometry,
-                           style_function=lambda x: {"fillColor": "none", "color": "darkblue", "weight": 3,"dashArray": "5, 5"},
-                           tooltip="Area of Interest Boundary").add_to(m)
+            # Add AOI boundary
+            folium.GeoJson(
+                st.session_state.aoi.to_crs("EPSG:4326").geometry,
+                style_function=lambda x: {"fillColor": "none", "color": "darkblue", "weight": 3, "dashArray": "5, 5"},
+                tooltip="Area of Interest Boundary"
+            ).add_to(m)
 
-            for _,row in gdf_cropped.iterrows():
-                popup_html = f"<b>Stop:</b> {row.get('stop_name','')}<br>..." # Simplified
-                folium.CircleMarker(location=[row.geometry.y,row.geometry.x],
-                                    radius=6, color="black",weight=1, fill=True,
-                                    fill_color=get_color(row["service_quality"]),
-                                    fill_opacity=1, popup=popup_html, tooltip=popup_html).add_to(m)
+            # Add stops with clean popups
+            for _, row in gdf_cropped.iterrows():
+                route_names_clean = clean_stop_value(row.get('route_names', ''))
+                route_type_clean = clean_stop_value(row.get('route_type', ''))
+
+                popup_html = f"""
+                <b>Stop:</b> {row.get('stop_name','')}<br>
+                <b>Quality:</b> {row.get('service_quality','')}<br>
+                <b>Frequency:</b> {row.get('frequency','')}<br>
+                <b>Routes:</b> {route_names_clean}<br>
+                <b>Type:</b> {route_type_clean}
+                """
+
+                folium.CircleMarker(
+                    location=[row.geometry.y, row.geometry.x],
+                    radius=6,
+                    color="black",
+                    weight=1,
+                    fill=True,
+                    fill_color=get_color(row["service_quality"]),
+                    fill_opacity=1,
+                    popup=folium.Popup(popup_html, max_width=300),
+                    tooltip=popup_html
+                ).add_to(m)
             
-            folium.Marker([addr["lat"],addr["lon"]],icon=folium.Icon(color='red',icon='home')).add_to(m)
+            # Add home marker
+            folium.Marker([addr["lat"], addr["lon"]], icon=folium.Icon(color='red', icon='home')).add_to(m)
 
-            # legend_html = """
-            # <div style="position: fixed; bottom: 50px; left: 50px; width: 160px; height: 250px; 
-            #             border:2px solid grey; z-index:9999; font-size:14px; background:white; padding:10px;">
-            # <b>Quality</b><br>
-            # <i style='color:#000000; font-weight:bold'> No service </i><br>
-            # """
-            # for i in range(1,13):
-            #     hexc = matplotlib.colors.rgb2hex(cmap_blue((i-1)/(12-1)))
-            #     legend_html += f"<i style='color:{hexc}; font-weight:bold'> {to_roman(i)} </i><br>"
-            # legend_html += "</div>"
-            # m.get_root().html.add_child(folium.Element(legend_html))
-
-            st_folium(m,width=1200,height=600)
+            st_folium(m, width=1200, height=600)
 
         
 # === STEP 3: Accessibility Analysis ===
 if st.session_state.level_of_service_gdf is not None:
     
     st.markdown("---")
-    st.header("3. Accessibility Analysis: Demand & Offer")
+    st.header("3. Population accessibility")
 
     # MODIFICATION 3: Use the file path from session state, populated in Step 2.
     population_file = st.session_state.population_file
@@ -548,7 +582,7 @@ if st.session_state.level_of_service_gdf is not None:
     # if population_file is None:
     #     st.info("Population data download required for raster analysis is in progress or failed. Please check Step 2.")
         
-    run_raster_clicked = st.button("Generate Demand & Offer Rasters", key="run_raster_btn")
+    run_raster_clicked = st.button("Next", key="run_raster_btn")
     
     show_step3_results = run_raster_clicked or st.session_state.raster_ready
 
@@ -568,7 +602,7 @@ if st.session_state.level_of_service_gdf is not None:
             if st.session_state.population_file is None:
                 st.subheader("Population Data Retrieval")
                 with st.status("Checking cache or starting WorldPop 100m download...", expanded=True) as status:
-                    pop_file, error = get_population_file_cached(st.session_state.aoi_download, population_folder)
+                    pop_file, error = get_population_file_cached(st.session_state.aoi_pop_download, population_folder)
                     
                     if pop_file:
                         st.session_state.population_file = pop_file
@@ -600,223 +634,162 @@ if st.session_state.level_of_service_gdf is not None:
 
         # --- Display Map (if raster generation is complete) ---
         if st.session_state.raster_ready:
-            
+
             st.markdown("---")
             st.subheader("Accessibility Raster Visualization")
-            
+
             aoi_geom = st.session_state.aoi
-            m_raster = folium.Map(location=[addr["lat"],addr["lon"]],zoom_start=13, tiles="CartoDB Positron")
-            
+            m_raster = folium.Map(location=[addr["lat"], addr["lon"]], zoom_start=13, tiles="CartoDB Positron")
+
             los_colors_list = [get_grade_color_and_index(grade)[0] for grade in LOS_GRADES]
-            # Ensure transparency for unclassified (implicit) areas by using transparent for 'transparent' codes
-            los_cmap_array = [c if c != 'transparent' else '#00000000' for c in los_colors_list] 
-            los_cmap = colors.ListedColormap(los_cmap_array)
-            
+
+            # --- Raster files ---
             files_to_plot = {
-                "population_density_0.tif": {"name": "1. Population Density (Demand Base)", "cmap": "PopViridis", "range": [1, 15000], "show": True},
-                "offer.tif": {"name": "2. Service Offer (LOS Index)", "cmap": los_cmap, "range": [-0.5, 11.5], "show": True},
-                "demand.tif": {"name": "3. Service Demand (LOS Index)", "cmap": los_cmap, "range": [-0.5, 11.5], "show": False},
-                "difference.tif": {"name": "4. Transit Desert (Offer < Demand)", "cmap": "RdYlGn", "range": [-12, 12], "show": False},
+                "population_density_0.tif": {"name": "Population Density", "show": False},
+                "offer.tif": {"name": "Provided service", "show": True},
+                "demand.tif": {"name": "Demanded service", "show": False},
+                "difference.tif": {"name": "Transit Desert", "show": True},
             }
-            
-            pop_data_cache = None # Cache for density data
+
+            pop_data_cache = None
 
             for filename, config in files_to_plot.items():
                 filepath = os.path.join(level_of_service_path, filename)
-                if not os.path.exists(filepath): continue
-                
-                try:
-                    # Read raster data
-                    data, transform, crs = raster_utils.read_raster(filepath, aoi=aoi_geom, projected=False) 
+                if not os.path.exists(filepath):
+                    continue
 
-                    if data.size == 0: continue
-                    
-                    # === CRITICAL FIX: Aggressive float conversion and NaN isolation ===
-                    
-                    # 1. Force array to float64, copying the data.
+                try:
+                    data, transform, crs = raster_utils.read_raster(filepath, aoi=aoi_geom, projected=True)
+                    if data.size == 0:
+                        continue
+
                     data_float = data.astype(np.float64, copy=True)
-                    
-                    # 2. Explicitly mask all non-finite values (NaN, Inf)
-                    non_finite_mask = ~np.isfinite(data_float)
-                    data_masked = np.ma.masked_array(data_float, mask=non_finite_mask)
-                    
-                    # =================================================================
-                    
+                    data_masked = np.ma.masked_array(data_float, mask=~np.isfinite(data_float))
+
                     height, width = data.shape
                     left, bottom, right, top = rasterio.transform.array_bounds(height, width, transform)
-                    
-                    cmap = config["cmap"]
-                    vmin, vmax = config["range"]
-                    interpolation = 'nearest'
-                    data_to_plot = data_masked.copy()
-                    
-                    
-                    if filename == "population_density_0.tif":
-                        # Cache population data
-                        pop_data_cache = data_to_plot.copy() 
-                        
-                        # Custom PopViridis: transparent below MIN_POP_DENSITY
-                        cmap_colors = [(0, '#00000000')] # Start fully transparent
-                        norm_min_pop = MIN_POP_DENSITY / 15000.0
-                        
-                        cmap_colors.append((norm_min_pop * 0.9999, '#00000000')) 
-                        
-                        cmap_colors.append((norm_min_pop, colors.rgb2hex(plt.get_cmap('viridis')(0.1))))
-                        cmap_colors.append((1, colors.rgb2hex(plt.get_cmap('viridis')(0.95))))
-                        
-                        cmap = colors.LinearSegmentedColormap.from_list("PopViridisCustom", cmap_colors)
-                        
-                        # Mask out values below or equal to 0 
-                        data_to_plot = np.ma.masked_where(data_masked <= 0, data_masked)
-                        vmin = 1
-                        vmax = 15000
-                        
-                    elif filename == "difference.tif":
-                        # Defensive Population Reading
-                        if pop_data_cache is None:
-                            pop_filepath = os.path.join(level_of_service_path, "population_density_0.tif")
-                            pop_data_raw, _, _ = raster_utils.read_raster(pop_filepath, aoi=aoi_geom, projected=False)
-                            pop_data_float = pop_data_raw.astype(np.float64, copy=True) 
-                            # Re-apply robust masking to the cache if needed
-                            pop_data_cache = np.ma.masked_array(pop_data_float, mask=~np.isfinite(pop_data_float))
-                        
-                        if pop_data_cache.shape != data_to_plot.shape:
-                            st.error("Population raster shape mismatch for difference calculation.")
-                            continue
-                        
-                        # Extract underlying numpy arrays for mask computation
-                        pop_data_unmasked = pop_data_cache.data
-                        diff_data_unmasked = data_to_plot.data
-                        
-                        # Inherited masks (to ensure we don't calculate on masked data)
-                        diff_mask_inherited = data_to_plot.mask
-                        pop_mask_inherited = pop_data_cache.mask
 
-                        # Check 1: Pop density must be sufficient (and not masked)
-                        pop_sufficient = (pop_data_unmasked >= MIN_POP_DENSITY) & (~pop_mask_inherited)
-                        
-                        # Check 2: Difference must be negative (Offer < Demand) (and not masked)
-                        diff_negative = (diff_data_unmasked < 0) & (~diff_mask_inherited)
-                        
-                        # Combine: Mask where we DO NOT want to plot
-                        plot_mask = ~(pop_sufficient & diff_negative) 
-                        
-                        # Create visualization array (1 where transit desert, NaN otherwise)
-                        data_viz = np.full(data_to_plot.shape, np.nan, dtype=np.float64)
-                        data_viz[~plot_mask] = 1 
-                        
-                        # Mask NaNs (which are the transparent areas)
-                        data_to_plot = np.ma.masked_invalid(data_viz)
-                        
-                        # Custom Colormap: [Transparent, Pink]
-                        cmap = colors.ListedColormap(['#00000000', TRANSIT_DESERT_COLOR])
-                        vmin = 0
-                        vmax = 1
-                        
-                    elif filename in ["offer.tif", "demand.tif"]:
-                        # LOS Rasters 
-                        data_to_plot = np.ma.masked_where((data_masked < 0) | (data_masked > 11), data_masked)
-                        vmin = -0.5
-                        vmax = 11.5
-                        
-                    
-                    # --- Plotting ---
-                    fig, ax = plt.subplots(figsize=(10, 10))
-                    im = ax.imshow(data_to_plot, cmap=cmap, vmin=vmin, vmax=vmax, origin='upper', interpolation=interpolation)
-
-                    ax.set_axis_off()
-                    buf = io.BytesIO()
-                    # We save without borders/padding and with a transparent background
-                    fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0, transparent=True)
-                    plt.close(fig)
-                    buf.seek(0)
-                    
-                    # ... (Folium ImageOverlay definition)
                     transformer = pyproj.Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
                     minx, miny = transformer.transform(left, bottom)
                     maxx, maxy = transformer.transform(right, top)
                     wgs_bounds = [[miny, minx], [maxy, maxx]]
 
+                    # --- Generate image overlay for each raster ---
+                    fig, ax = plt.subplots(figsize=(10, 10))
+                    ax.set_axis_off()
+
+                    if filename == "population_density_0.tif":
+                        pop_data_cache = data_masked.copy()
+                        cmap = plt.get_cmap("viridis")
+                        data_to_plot = np.ma.masked_where(data_masked <= 0, data_masked)
+                        ax.imshow(data_to_plot, cmap=cmap, origin='upper')
+
+                    elif filename == "difference.tif":
+                        if pop_data_cache is None:
+                            pop_filepath = os.path.join(level_of_service_path, "population_density_0.tif")
+                            pop_data_raw, _, _ = raster_utils.read_raster(pop_filepath, aoi=aoi_geom, projected=True)
+                            pop_data_cache = np.ma.masked_array(pop_data_raw.astype(np.float64), mask=~np.isfinite(pop_data_raw))
+                        pop_mask = (pop_data_cache.data >= MIN_POP_DENSITY) & (~pop_data_cache.mask)
+                        desert_mask = (data_masked.data < 0) & (~data_masked.mask) & pop_mask
+                        data_viz = np.zeros_like(data_masked)
+                        data_viz[desert_mask] = 1
+                        ax.imshow(np.ones_like(data_viz), cmap=colors.ListedColormap(['#00000000']), origin='upper')
+                        ax.contourf(
+                            np.arange(data_viz.shape[1]),
+                            np.arange(data_viz.shape[0]),
+                            desert_mask,
+                            levels=[0.5, 1],
+                            hatches=['////'],
+                            colors='none',
+                            edgecolor=TRANSIT_DESERT_COLOR,
+                            linewidth=0.0
+                        )
+
+                    else:  # offer / demand
+                        data_to_plot = np.ma.masked_where((data_masked < 0) | (data_masked > 11), data_masked)
+                        cmap = colors.ListedColormap(los_colors_list)
+                        ax.imshow(data_to_plot, cmap=cmap, origin='upper')
+
+                    buf = io.BytesIO()
+                    fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0, transparent=True)
+                    plt.close(fig)
+                    buf.seek(0)
+                    image_data = buf.read()
+
                     folium.raster_layers.ImageOverlay(
-                        image=f"data:image/png;base64,{base64.b64encode(buf.read()).decode()}",
+                        image=f"data:image/png;base64,{base64.b64encode(image_data).decode()}",
                         bounds=wgs_bounds,
                         name=config["name"],
                         opacity=0.8,
-                        overlay=True, 
+                        overlay=True,
                         control=True,
                         show=config["show"]
                     ).add_to(m_raster)
-                
+
                 except Exception as e:
-                    st.warning(f"Error plotting raster {filename}: Plotting failure encountered during float/masking conversion: {e}")
-                    # Retain the original error type if it still appears
-                    if "ufunc 'isnan' not supported" in str(e):
-                         st.error(f"FATAL TYPE ERROR: ufunc 'isnan' failed on file {filename}. Check source file dtype.")
-                    
-            stops_group = folium.FeatureGroup(name="6. Service Quality Stops (Points)", show=False).add_to(m_raster)
-            
+                    st.warning(f"Error plotting raster {filename}: {e}")
+
+            # --- Stops ---
+            stops_group = folium.FeatureGroup(name="Service Quality Stops", show=False).add_to(m_raster)
             stops_to_plot = st.session_state.stop_quality_gdf_cropped.copy()
-            
+
+            # Rename columns
             col_map_rename = {
                 f"service_quality_{START_HOUR}h_{END_HOUR}h":"service_quality",
                 f"interval_{START_HOUR}h_{END_HOUR}h":"frequency",
                 f"route_names_{START_HOUR}h_{END_HOUR}h":"route_names",
-                f"route_type_{START_HOUR}h_{END_HOUR}h":"route_type"
+                #f"route_type_{START_HOUR}h_{END_HOUR}h":"route_type"
             }
             stops_to_plot = stops_to_plot.rename(columns=col_map_rename)
             stops_to_plot["service_quality"] = stops_to_plot["service_quality"].fillna(0).astype(int)
-            
-            # The loop now uses the correctly renamed DataFrame: stops_to_plot
-            for _,row in stops_to_plot.iterrows(): 
-                popup_html = f"<b>Stop:</b> {row.get('stop_name','')}<br>..." # Simplified
-                folium.CircleMarker(location=[row.geometry.y,row.geometry.x],
-                                    radius=5, color="black",weight=1, fill=True,
-                                    fill_color=get_color(row["service_quality"]), fill_opacity=1,
-                                    popup=popup_html, tooltip=popup_html).add_to(stops_group)
-                
-            # --- Custom Legends for Rasters ---
-            
-            # LOS Index Legend (Applicable to Offer and Demand)
-            los_legend_html = """
-            <div style="position: fixed; bottom: 50px; right: 10px; width: 180px; height: 300px; 
-                        border:2px solid grey; z-index:9999; font-size:12px; background:white; padding:5px;">
-            <b>LOS Index (Offer/Demand)</b><br>
-            """
-            for i, grade in enumerate(LOS_GRADES):
-                color, _, _ = get_grade_color_and_index(grade)
-                los_legend_html += f'<i style="background:{color}; border: 1px solid black; padding: 2px 5px; margin: 1px; display: inline-block;"></i> {grade}<br>'
-            
-            los_legend_html += "</div>"
-            
-            # Transit Desert (Difference) Legend
-            diff_legend_html = f"""
-            <div style="position: fixed; bottom: 50px; right: 200px; width: 180px; height: 80px; 
-                        border:2px solid grey; z-index:9999; font-size:12px; background:white; padding:5px;">
-            <b>Transit Desert (Unmet Need)</b><br>
-            <i style="background:transparent; border: 1px dashed black; padding: 2px 5px; margin: 1px; display: inline-block;"></i> Offer $\\ge$ Demand (or Low Pop)<br>
-            <i style="background:{TRANSIT_DESERT_COLOR}; border: 1px solid black; padding: 2px 5px; margin: 1px; display: inline-block;"></i> Transit Desert (Unmet Need - Pink Area)<br>
-            (Only displayed where Pop $\\ge$ {MIN_POP_DENSITY} P/km²)
-            </div>
-            """
 
-            # Stop Quality Legend (Blue Roman)
-            legend_html_stop_quality = """
-            <div style="position: fixed; bottom: 50px; left: 50px; width: 160px; height: 250px; 
-                        border:2px solid grey; z-index:9999; font-size:14px; background:white; padding:10px;">
-            <b>Stop Quality Index</b><br>
-            <i style='color:#000000; font-weight:bold'> No service </i><br>
-            """
-            for i in range(1,13):
-                hexc = matplotlib.colors.rgb2hex(cmap_blue((i-1)/(12-1)))
-                legend_html_stop_quality += f"<i style='color:{hexc}; font-weight:bold'> {to_roman(i)} </i><br>"
-            legend_html_stop_quality += "</div>"
-            
-            
-            m_raster.get_root().html.add_child(folium.Element(los_legend_html))
-            m_raster.get_root().html.add_child(folium.Element(diff_legend_html))
-            m_raster.get_root().html.add_child(folium.Element(legend_html_stop_quality))
+            # --- Clean stop columns ---
+            def clean_stop_value(val):
+                """Convert Series/list/string to clean string for popup"""
+                if isinstance(val, (pd.Series, np.ndarray)):
+                    val = list(val)
+                if isinstance(val, list):
+                    cleaned = [re.sub(r'_file_\d+', '', str(x)) for x in val if x is not None and str(x) != 'nan']
+                    return ", ".join(cleaned)
+                if isinstance(val, str):
+                    return re.sub(r'_file_\d+', '', val)
+                return ""
 
-            # Add Layer Control
+            stops_to_plot['route_type'] = stops_to_plot['route_type'].apply(clean_stop_value)
+            stops_to_plot['route_names'] = stops_to_plot['route_names'].apply(clean_stop_value)
+
+            for _, row in stops_to_plot.iterrows():
+                popup_html = f"""
+                <b>Stop:</b> {row.get('stop_name','')}<br>
+                <b>Quality:</b> {row.get('service_quality','')}<br>
+                <b>Frequency:</b> {row.get('frequency','')}<br>
+                <b>Routes:</b> {row['route_names']}<br>
+                <b>Type:</b> {row['route_type']}
+                """
+                folium.CircleMarker(
+                    location=[row.geometry.y, row.geometry.x],
+                    radius=5, color="black", weight=1, fill=True,
+                    fill_color=get_color(row["service_quality"]), fill_opacity=1,
+                    popup=folium.Popup(popup_html, max_width=300)
+                ).add_to(stops_group)
+
+            # --- Legends using branca ---
+            def add_legend(title, colors, labels):
+                html = f"<div style='background:white; padding:10px; border:2px solid grey; font-size:12px; color:black;'><b>{title}</b><br>"
+                for c, l in zip(colors, labels):
+                    html += f"<i style='background:{c}; padding:2px 5px; margin:1px; display:inline-block;'></i> {l}<br>"
+                html += "</div>"
+                legend = branca.element.MacroElement()
+                legend._template = branca.element.Template(html)
+                m_raster.get_root().add_child(legend)
+
+            # LOS legend
+            add_legend("LOS Index", los_colors_list, LOS_GRADES)
+
+            # Transit Desert legend
+            add_legend("Transit Desert", [TRANSIT_DESERT_COLOR], ["Transit Desert (hatched)"])
+
+            # --- Layer Control ---
             folium.LayerControl(collapsed=False).add_to(m_raster)
-            
+
             st_folium(m_raster, width=1200, height=600)
