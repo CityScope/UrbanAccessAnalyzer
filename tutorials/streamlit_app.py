@@ -238,8 +238,10 @@ def get_color(val):
 
 
 def plot_service_intensity(service_intensity):
-    if not isinstance(service_intensity, pd.DataFrame): pdf = service_intensity.to_pandas()
-    else: pdf = service_intensity.copy()
+    if not isinstance(service_intensity, pd.DataFrame):
+        pdf = service_intensity.to_pandas()
+    else:
+        pdf = service_intensity.copy()
     pdf["date"] = pd.to_datetime(pdf["date"])
     plt.figure(figsize=(12,6))
     
@@ -247,10 +249,16 @@ def plot_service_intensity(service_intensity):
     weekend_hatch = "xx"
     holiday_hatch = "//"
 
-    if "file_id" in pdf.columns:
+    provider_map = {}
+    if "file_id" in pdf.columns and hasattr(st.session_state, "gtfs_providers"):
         unique_files = sorted(pdf["file_id"].unique())
+        provider_list = st.session_state.gtfs_providers
+        provider_map = {fid: provider_list[i] if i < len(provider_list) else f"File {fid}"
+                        for i, fid in enumerate(unique_files)}
+        
         color_cycle = plt.cm.tab20.colors
         color_map = {fid: color_cycle[i%len(color_cycle)] for i,fid in enumerate(unique_files)}
+
         grouped = pdf.groupby("date")
         for date, group in grouped:
             bottom=0
@@ -261,7 +269,9 @@ def plot_service_intensity(service_intensity):
                 hatch = holiday_hatch if row.get("holiday",False) else weekend_hatch if row.get("weekend",False) else None
                 plt.bar(date,val,width=bar_width,bottom=bottom,color=color,hatch=hatch,edgecolor="black")
                 bottom+=val
-        file_handles = [plt.Line2D([],[],color=color_map[fid],label=f"File {fid}",linewidth=10) for fid in unique_files]
+
+        # Use provider names as legend labels
+        file_handles = [plt.Line2D([],[],color=color_map[fid],label=provider_map[fid],linewidth=10) for fid in unique_files]
         pattern_handles = [mpatches.Patch(facecolor="white",hatch=weekend_hatch,edgecolor="black",label="Weekend"),
                            mpatches.Patch(facecolor="white",hatch=holiday_hatch,edgecolor="black",label="Holiday")]
         plt.legend(handles=file_handles+pattern_handles,title="Legend",bbox_to_anchor=(1.05,1),loc="upper left")
@@ -274,6 +284,7 @@ def plot_service_intensity(service_intensity):
                          mpatches.Patch(facecolor=base_color,hatch=weekend_hatch,edgecolor="black",label="Weekend"),
                          mpatches.Patch(facecolor=base_color,hatch=holiday_hatch,edgecolor="black",label="Holiday")]
         plt.legend(handles=pattern_handles,title="Legend",bbox_to_anchor=(1.05,1),loc="upper left")
+
     plt.xlabel("Date")
     plt.ylabel("Service Intensity")
     plt.title("Service Intensity Over Time")
@@ -362,8 +373,6 @@ if st.session_state.confirmed_address:
                        style_function=lambda x: {"fillColor":"#3388ff","color":"#3388ff","weight":2,"fillOpacity":0.2},
                        tooltip="Area of Interest").add_to(fmap)
     st_folium(fmap,width=700,height=300)
-
-    # Search feeds button logic
     if not st.session_state.gtfs_ready:
         if st.button("Search feeds", key="search_feeds_btn"):
             try:
@@ -380,18 +389,8 @@ if st.session_state.confirmed_address:
                         )
                         st.success(f"{len(feeds)} feed(s) found")
                         
-                        # MODIFICATION 1: Nicer formatted, scrollable providers list
-                        provider_names = sorted(list(set([f['provider'] for f in feeds])))
-                        provider_df = pd.DataFrame(provider_names, columns=['Provider Name'])
-                        
-                        st.subheader("Providers:")
-                        st.dataframe(
-                            provider_df,
-                            hide_index=True,
-                            use_container_width=True,
-                            height=200 # Show approximately 5 rows
-                        )
-                        # END MODIFICATION 1
+                        # Store provider names in session state
+                        st.session_state.gtfs_providers = sorted(list(set([f['provider'] for f in feeds])))
 
                         files = api.download_feeds(feeds, download_folder=os.path.join(WORK_DIR,"gtfs_files"), overwrite=False)
                         
@@ -405,6 +404,17 @@ if st.session_state.confirmed_address:
                         st.rerun() # Rerun to proceed to Step 2
             except Exception as e:
                 st.error(f"Feed error: {e}")
+
+# Always show provider list if available
+if hasattr(st.session_state, "gtfs_providers") and st.session_state.gtfs_providers:
+    st.subheader("Providers:")
+    provider_df = pd.DataFrame(st.session_state.gtfs_providers, columns=['Provider Name'])
+    st.dataframe(
+        provider_df,
+        hide_index=True,
+        use_container_width=True,
+        height=200  # show ~5 rows
+    )
 
 # === STEP 2: Service Quality & Buffers ===
 if st.session_state.gtfs_ready:
@@ -529,7 +539,16 @@ if st.session_state.gtfs_ready:
                 los_gdf_cropped.__geo_interface__,
                 name="LOS Coverage Buffers",
                 style_function=style_buffer_los_color,
-                tooltip=False, popup=False
+                tooltip=folium.features.GeoJsonTooltip(
+                    fields=["level_of_service"],
+                    aliases=["Level of Service:"],
+                    localize=True
+                ),
+                popup=folium.features.GeoJsonPopup(
+                    fields=["level_of_service"],
+                    aliases=["Level of Service:"],
+                    localize=True
+                )
             ).add_to(m)
 
             # Add AOI boundary
@@ -576,7 +595,6 @@ if st.session_state.level_of_service_gdf is not None:
     st.markdown("---")
     st.header("3. Population accessibility")
 
-    # MODIFICATION 3: Use the file path from session state, populated in Step 2.
     population_file = st.session_state.population_file
 
     # if population_file is None:
@@ -589,11 +607,44 @@ if st.session_state.level_of_service_gdf is not None:
     if show_step3_results:
         
         # --- Display Density Matrix (IMMEDIATE DISPLAY) ---
+        # --- Data ---
+        los_data = {
+            "Required Level of Service": ["A", "B", "C", "D–F"],
+            "Population Density (pop/km²)": [3500, 2500, 1500, 300]
+        }
+
+        density_matrix_display_data = pd.DataFrame(los_data)
+
+        # --- Styling Function ---
+        def color_density_matrix(df):
+            def color_by_service(service):
+                colors = {
+                    "A": "#2ecc71",   # green
+                    "B": "#f1c40f",   # yellow
+                    "C": "#e67e22",   # orange
+                    "D–F": "#e74c3c"  # red
+                }
+                return f"background-color: {colors.get(service, 'white')}; color: black; text-align: center;"
+            
+            return df.style.applymap(color_by_service, subset=["Required Level of Service"]) \
+                        .set_table_styles([
+                            {"selector": "th",
+                                "props": [("background-color", "#004c6d"),
+                                        ("color", "white"),
+                                        ("text-align", "center")]},
+                            {"selector": "td",
+                                "props": [("text-align", "center"),
+                                        ("border", "1px solid #ccc"),
+                                        ("padding", "6px")]}
+                        ]) \
+                        .hide(axis="index")
+
+        # --- Streamlit Layout ---
         col_density, _ = st.columns([1, 2])
         with col_density:
             st.subheader("Population Demand Matrix")
             styled_density_matrix = color_density_matrix(density_matrix_display_data)
-            st.markdown(styled_density_matrix.to_html(index=False, escape=False), unsafe_allow_html=True)
+            st.markdown(styled_density_matrix.to_html(escape=False), unsafe_allow_html=True)
         # -----------------------------------------------------------------------------
         
         if run_raster_clicked and not st.session_state.raster_ready:
@@ -793,3 +844,70 @@ if st.session_state.level_of_service_gdf is not None:
             folium.LayerControl(collapsed=False).add_to(m_raster)
 
             st_folium(m_raster, width=1200, height=600)
+
+            # --- Population per Service Category Table ---
+            st.markdown("---")
+            st.subheader("📊 Accessibility Summary")
+
+            try:
+                # --- File paths ---
+                pop_filepath = os.path.join(level_of_service_path, "population.tif")
+                diff_filepath = os.path.join(level_of_service_path, "difference.tif")
+                offer_filepath = os.path.join(level_of_service_path, "offer.tif")
+                aoi_geom = st.session_state.aoi
+
+                # --- Read rasters using your helper ---
+                pop_data, _, _ = raster_utils.read_raster(pop_filepath, aoi=aoi_geom, projected=False)
+                diff_data, _, _ = raster_utils.read_raster(diff_filepath, aoi=aoi_geom, projected=False)
+                offer_data, _, _ = raster_utils.read_raster(offer_filepath, aoi=aoi_geom, projected=False)
+
+                # --- Mask invalid / nan values ---
+                pop_data = np.where(np.isfinite(pop_data), pop_data, np.nan)
+                diff_data = np.where(np.isfinite(diff_data), diff_data, np.nan)
+                offer_data = np.where(np.isfinite(offer_data), offer_data, np.nan)
+
+                # --- Compute population with insufficient coverage ---
+                pop_total = np.nansum(pop_data)
+                pop_insufficient = np.nansum(pop_data[(diff_data < 0) & (pop_data > 0)])
+                pct_insufficient = (pop_insufficient / pop_total * 100) if pop_total > 0 else 0
+
+                st.markdown(
+                    f"### Population with insufficient coverage: "
+                    f"<span style='color:#e74c3c; font-weight:bold;'>{pct_insufficient:.2f}%</span>",
+                    unsafe_allow_html=True
+                )
+
+                # --- LOS mapping ---
+                los_mapping = {
+                    0: "A1", 1: "A2", 2: "A3",
+                    3: "B1", 4: "B2", 5: "B3",
+                    6: "C1", 7: "C2", 8: "C3",
+                    9: "D", 10: "E", 11: "F"
+                }
+
+                # --- Aggregate population per LOS ---
+                valid_mask = pop_data > 0
+                offer_int = np.where(np.isnan(offer_data), 12, offer_data).astype(int)
+
+                pop_by_offer = {}
+                for val, label in los_mapping.items():
+                    pop_by_offer[label] = np.nansum(pop_data[(offer_int == val) & valid_mask])
+                
+                # “No Service”: population with NaN offer values
+                pop_by_offer["No Service"] = np.nansum(pop_data[np.isnan(offer_data) & valid_mask])
+
+                # --- Create DataFrame ---
+                pop_offer_df = (
+                    pd.DataFrame({
+                        "Level of Service": list(pop_by_offer.keys()),
+                        "Population": list(pop_by_offer.values())
+                    })
+                    .assign(Population=lambda df: df["Population"].round(0).astype(int))
+                )
+
+                # --- Display table ---
+                st.markdown("### Population per Service Category")
+                st.dataframe(pop_offer_df.style.format({"Population": "{:,}"}), use_container_width=True)
+
+            except Exception as e:
+                st.error(f"Failed to calculate population coverage summary: {e}")
