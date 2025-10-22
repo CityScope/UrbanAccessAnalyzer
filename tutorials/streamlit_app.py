@@ -642,7 +642,7 @@ if st.session_state.level_of_service_gdf is not None:
         # --- Streamlit Layout ---
         col_density, _ = st.columns([1, 2])
         with col_density:
-            st.subheader("Population Demand Matrix")
+            st.subheader("Level of service requirements")
             styled_density_matrix = color_density_matrix(density_matrix_display_data)
             st.markdown(styled_density_matrix.to_html(escape=False), unsafe_allow_html=True)
         # -----------------------------------------------------------------------------
@@ -856,7 +856,7 @@ if st.session_state.level_of_service_gdf is not None:
                 offer_filepath = os.path.join(level_of_service_path, "offer.tif")
                 aoi_geom = st.session_state.aoi
 
-                # --- Read rasters using your helper ---
+                # --- Read rasters ---
                 pop_data, _, _ = raster_utils.read_raster(pop_filepath, aoi=aoi_geom, projected=False)
                 diff_data, _, _ = raster_utils.read_raster(diff_filepath, aoi=aoi_geom, projected=False)
                 offer_data, _, _ = raster_utils.read_raster(offer_filepath, aoi=aoi_geom, projected=False)
@@ -892,22 +892,29 @@ if st.session_state.level_of_service_gdf is not None:
                 pop_by_offer = {}
                 for val, label in los_mapping.items():
                     pop_by_offer[label] = np.nansum(pop_data[(offer_int == val) & valid_mask])
-                
+
                 # “No Service”: population with NaN offer values
                 pop_by_offer["No Service"] = np.nansum(pop_data[np.isnan(offer_data) & valid_mask])
 
-                # --- Create DataFrame ---
-                pop_offer_df = (
-                    pd.DataFrame({
-                        "Level of Service": list(pop_by_offer.keys()),
-                        "Population": list(pop_by_offer.values())
-                    })
-                    .assign(Population=lambda df: df["Population"].round(0).astype(int))
+                # --- Create DataFrame with percentage of total population ---
+                pop_offer_df = pd.DataFrame({
+                    "Level of Service": list(pop_by_offer.keys()),
+                    "Population": list(pop_by_offer.values())
+                })
+                pop_offer_df["Population"] = pop_offer_df["Population"].round(0).astype(int)
+                pop_offer_df["% of Total"] = (pop_offer_df["Population"] / pop_total * 100).round(2)
+
+                # --- Display table without index ---
+                st.markdown("### Population per Service Category")
+                st.dataframe(
+                    pop_offer_df.style.format({
+                        "Population": "{:,}",
+                        "% of Total": "{:.2f}%"
+                    }).hide(axis="index"),
+                    use_container_width=True
                 )
 
-                # --- Display table ---
-                st.markdown("### Population per Service Category")
-                st.dataframe(pop_offer_df.style.format({"Population": "{:,}"}), use_container_width=True)
-
+            except Exception as e:
+                st.error(f"Error processing rasters: {e}")
             except Exception as e:
                 st.error(f"Failed to calculate population coverage summary: {e}")
