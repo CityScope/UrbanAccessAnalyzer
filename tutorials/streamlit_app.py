@@ -1151,7 +1151,16 @@ if st.session_state.level_of_service_gdf is not None:
             # )
 
             # Calculate % of total
-            pop_offer_df["% of Total"] = pop_offer_df["Population"] / pop_offer_df["Population"].sum() * 100
+            pop_offer_df["Population"] = (
+                pd.to_numeric(pop_offer_df["Population"], errors="coerce")
+                .replace([np.inf, -np.inf], 0)
+                .fillna(0)
+            )
+            if pop_offer_df["Population"].sum() == 0:
+                st.warning(f"Total population is 0")
+                pop_offer_df["% of Total"] = 0
+            else:
+                pop_offer_df["% of Total"] = pop_offer_df["Population"] / pop_offer_df["Population"].sum() * 100
 
             # Create color list for each row
             colors = []
@@ -1214,4 +1223,4 @@ if st.session_state.level_of_service_gdf is not None:
                 t.set_visible(False)
 
             # Display pie chart in Streamlit
-            st.pyplot(fig, width='stretch')
+            st.pyplot(fig, width=600)
