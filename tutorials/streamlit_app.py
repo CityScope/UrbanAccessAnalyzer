@@ -468,24 +468,35 @@ if st.session_state.confirmed_address:
 
         # --- Display current search params ---
         st.subheader("Search Parameters")
-        for key, label in [
-            ("country_codes", "Countries"),
-            ("subdivision_names", "States"),
-            ("municipalities", "Cities"),
-        ]:
-            st.write(f"**{label}:**")
-            items = st.session_state.search_area[key]
-            if not items:
-                st.caption("*(none)*")
-            else:
-                for i, val in enumerate(items):
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        st.write(f"- {val}")
-                    with col2:
-                        if st.button("🗑️", key=f"del_{key}_{i}"):
-                            st.session_state.search_area[key].pop(i)
-                            st.rerun()
+        if st.session_state.search_area is not None:
+            for key, label in [
+                ("country_codes", "Countries"),
+                ("subdivision_names", "States"),
+                ("municipalities", "Cities"),
+            ]:
+                st.write(f"**{label}:**")
+                items = st.session_state.search_area[key]
+                if not items:
+                    st.caption("*(none)*")
+                else:
+                    for i, val in enumerate(items):
+                        col1, col2 = st.columns([4, 1])
+                        with col1:
+                            st.write(f"- {val}")
+                        with col2:
+                            if st.button("🗑️", key=f"del_{key}_{i}"):
+                                st.session_state.search_area[key].pop(i)
+                                st.rerun()
+        else:
+            disp = st.session_state.confirmed_address['display_name']
+            geo = get_geographic_suggestions_from_string(disp)
+            st.session_state.geo = geo
+            st.session_state.search_area = {
+                'country_codes':geo.get('country_codes'),
+                'subdivision_names':geo.get('subdivision_names'),
+                'municipalities':geo.get('municipalities'),
+            }
+            st.rerun()
     else:
         st.info("Search Level set to **Area** — address-based search is disabled.")
 
