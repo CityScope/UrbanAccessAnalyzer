@@ -101,7 +101,7 @@ density_matrix_display_data = pd.DataFrame(
 
 # === SESSION STATE ===
 defaults = {
-    "confirmed_address": None, "last_input": "", "gtfs_ready": False, "search_areas" : None,
+    "confirmed_address": None, "last_input": "", "gtfs_ready": False, "search_area" : None,
     "service_quality_gdf": None, "gtfs": None,
     "aoi": None, "aoi_download": None, "aoi_pop_download": None, "geo": None, "raster_ready": False,
     "level_of_service_gdf": None, "stop_quality_gdf_cropped": None,
