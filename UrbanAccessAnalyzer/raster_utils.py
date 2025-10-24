@@ -21,7 +21,7 @@ from typing import Union, Tuple, Optional, List
 from pyproj import Transformer
 import math
 from scipy.ndimage import convolve
-from skimage.morphology import disk # For density_raster kernel
+from skimage.morphology import disk, square # For density_raster kernel
 from rasterio.mask import mask
 
 
@@ -600,7 +600,8 @@ def rasterize(
 def buffer_mean(
     raster: np.ndarray,
     transform: Affine,
-    buffer: float = 0
+    buffer: float = 0,
+    kernel_shape: str = "disk",
 ) -> np.ndarray:
     """
     Calculates the density of values in a raster.
@@ -649,7 +650,11 @@ def buffer_mean(
         # Create a circular kernel (disk)
         # ceil to ensure the kernel covers the requested buffer distance
         kernel_radius_int = math.ceil(radius_pixels)
-        kernel = disk(kernel_radius_int)
+        if kernel_shape == "disk":
+            kernel = disk(kernel_radius_int)
+        else:
+            kernel = square(kernel_radius_int)
+            
         # Sum of kernel elements for normalization
         # This will be used to get the average value over the kernel area
         kernel_sum_pixels = kernel.sum()

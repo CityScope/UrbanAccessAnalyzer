@@ -307,7 +307,7 @@ def filter_population_by_streets(streets_gdf,population,street_buffer,aoi=None,t
     return raster
 
 
-def density(population_data:str|gpd.GeoDataFrame|np.ndarray,aoi=None,buffer:float=0,resolution:float=None, population_column:str=None, min_value:float=0, transform=None, crs=None, return_raster:bool=True):
+def density(population_data:str|gpd.GeoDataFrame|np.ndarray,aoi=None,buffer:float=0, kernel_shape: str = "disk", resolution:float=None, population_column:str=None, min_value:float=0, transform=None, crs=None, return_raster:bool=True):
     if isinstance(population_data,np.ndarray):
         if (transform is None) or (crs is None):
             raise Exception("If provinding raster array transform and crs are required")
@@ -315,6 +315,7 @@ def density(population_data:str|gpd.GeoDataFrame|np.ndarray,aoi=None,buffer:floa
         raster = copy.copy(population_data)
             
         raster[np.isnan(raster)] = 0 
+        raster[np.isinf(raster)] = 0
         raster[raster < 0] = 0 
     else:
         if isinstance(population_data,str):
@@ -323,8 +324,11 @@ def density(population_data:str|gpd.GeoDataFrame|np.ndarray,aoi=None,buffer:floa
             if population_column is None:
                 raise Exception("If population_data is a DataFrame the arg population_column is required")
             
-            population_data = population_data[~population_data[population_column].isna()]
-            population_data = population_data[~population_data[population_column].isnull()]
+            population_data[population_column] = (
+                pd.to_numeric(population_data[population_column], errors="coerce")
+                .replace([np.inf, -np.inf], 0)
+                .fillna(0)
+            )
             population_data = population_data[population_data[population_column] > 0]
 
             pop_utm = population_data.to_crs(population_data.estimate_utm_crs())
@@ -343,7 +347,7 @@ def density(population_data:str|gpd.GeoDataFrame|np.ndarray,aoi=None,buffer:floa
         raster_utm, transform_utm, crs_utm = raster_utils.reproject(raster,transform,crs,dst_crs='utm')
     
             
-    new_raster = raster_utils.buffer_mean(raster_utm,transform_utm,buffer=buffer)
+    new_raster = raster_utils.buffer_mean(raster_utm,transform_utm,buffer=buffer,kernel_shape=kernel_shape)
     new_raster, _, _ = raster_utils.reproject(
         new_raster,
         transform_utm,

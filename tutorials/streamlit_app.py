@@ -753,13 +753,14 @@ if st.session_state.gtfs_ready:
                 with st.spinner("Calculating stop service quality..."):
                     f = processing_helper.get_service_quality(outdir, gtfs,
                                 dates=datetime.combine(chosen_date,time()), times=[START_HOUR,END_HOUR])
-                    gdf = gpd.read_file(f)
-                    st.session_state.service_quality_gdf = gdf
+                    service_quality_gdf = gpd.read_file(f)
+                    print(service_quality_gdf)
+                    st.session_state.service_quality_gdf = service_quality_gdf
                     st.session_state.raster_ready = False 
                 
                 with st.spinner("Generating Level of Service Buffers..."):
                     level_of_service_gdf = isochrones.buffers(
-                        gdf, level_of_services=LOS_GRADES,
+                        service_quality_gdf, level_of_services=LOS_GRADES,
                         distance_matrix=processing_helper.DISTANCE_MATRIX, 
                         service_quality_col=f"service_quality_{START_HOUR}h_{END_HOUR}h",
                     )
