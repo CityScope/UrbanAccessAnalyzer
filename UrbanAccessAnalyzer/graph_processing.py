@@ -111,10 +111,6 @@ def __fix_duplicate_indices(nodes_gdf, edges_gdf, min_id = 0):
 
         # Convert MultiIndex to DataFrame
         idx_df = edges_gdf.index.to_frame(index=False)
-
-        # Sort by (u, v) to keep deterministic ordering
-        idx_df = idx_df.sort_values(["u", "v", "key"]).reset_index(drop=True)
-
         # Reassign 'key' to be sequential within each (u, v)
         idx_df["key"] = idx_df.groupby(["u", "v"]).cumcount()
 
@@ -867,8 +863,6 @@ def __split_at_edges(nodes_gdf, edges_gdf, new_edges_gdf):
 
     # Convert MultiIndex to DataFrame
     idx_df = edges_gdf.index.to_frame(index=False)
-    # Sort by (u, v) to keep deterministic ordering
-    idx_df = idx_df.sort_values(["u", "v", "key"]).reset_index(drop=True)
     # Reassign 'key' to be sequential within each (u, v)
     idx_df["key"] = idx_df.groupby(["u", "v"]).cumcount()
     # Reassign MultiIndex
