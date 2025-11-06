@@ -383,8 +383,18 @@ def overpass_api_query(query: str, bounds: gpd.GeoDataFrame | gpd.GeoSeries):
     query = query.replace("{bbox}", bbox)
     query = query.replace("bbox", bbox)
     query = query.replace("[out:xml]", "[out:json]")
-    overpass_url = "https://overpass-api.de/api/interpreter"
-    response = requests.get(overpass_url, params={"data": query})
+    overpass_urls = [
+        "https://overpass-api.de/api/interpreter",
+        "https://lz4.overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter"
+    ]
+    for url in overpass_urls:
+        response = requests.get(url, params={"data": query})
+        if response.status_code == 200 and response.text.strip():
+            break
+    else:
+        raise RuntimeError("No valid Overpass API response")
+    
     geojson_response = json2geojson(response.json())
     gdf = gpd.GeoDataFrame.from_features(geojson_response, crs=4326).reset_index(
         drop=True
@@ -400,46 +410,51 @@ def overpass_api_query(query: str, bounds: gpd.GeoDataFrame | gpd.GeoSeries):
     return gdf.to_crs(bounds.crs)
 
 
-# def green_areas(bounds, pedestrian_graph=None):
-#     query = """
-#         [out:json][timeout:25];
-#         (
-#         node[leisure = "garden"]({{bbox}});
-#         node[leisure = "park"]({{bbox}});
-#         node[landuse = "greenfield"]({{bbox}});
-#         node[landuse = "grass"]({{bbox}});
-#         node[landuse = "forest"]({{bbox}});
-#         way[leisure = "garden"]({{bbox}});
-#         way[leisure = "park"]({{bbox}});
-#         way[landuse = "greenfield"]({{bbox}});
-#         way[landuse = "grass"]({{bbox}});
-#         way[landuse = "forest"]({{bbox}});
-#         relation[leisure = "garden"]({{bbox}});
-#         relation[leisure = "park"]({{bbox}});
-#         relation[landuse = "greenfield"]({{bbox}});
-#         relation[landuse = "grass"]({{bbox}});
-#         relation[landuse = "forest"]({{bbox}});
-#         );
-#         out body;
-#         >;
-#         out skel qt;
-#     """
-#     green_areas_gdf = overpass_api_query()  # query,bounds)
+def green_areas(bounds, intersected_geom=None, min_area=200, min_width=10, buffer=5):
+    query = """
+        [out:json][timeout:25];
+        (
+        node[leisure = "garden"]({{bbox}});
+        node[leisure = "park"]({{bbox}});
+        node[landuse = "greenfield"]({{bbox}});
+        node[landuse = "grass"]({{bbox}});
+        node[landuse = "forest"]({{bbox}});
+        way[leisure = "garden"]({{bbox}});
+        way[leisure = "park"]({{bbox}});
+        way[landuse = "greenfield"]({{bbox}});
+        way[landuse = "grass"]({{bbox}});
+        way[landuse = "forest"]({{bbox}});
+        relation[leisure = "garden"]({{bbox}});
+        relation[leisure = "park"]({{bbox}});
+        relation[landuse = "greenfield"]({{bbox}});
+        relation[landuse = "grass"]({{bbox}});
+        relation[landuse = "forest"]({{bbox}});
+        );
+        out body;
+        >;
+        out skel qt;
+    """
+    green_areas_gdf = overpass_api_query(query,bounds)  # query,bounds)
+    crs = green_areas_gdf.estimate_utm_crs()
+    green_areas_gdf = green_areas_gdf.to_crs(crs)
+    green_areas_gdf = green_areas_gdf[green_areas_gdf.geometry.area > min_area]
+    green_areas_gdf = green_areas_gdf.geometry.union_all()
+    green_areas_gdf = shapely.buffer(green_areas_gdf,-min_width,quad_segs=2)
+    green_areas_gdf = shapely.buffer(green_areas_gdf,buffer+min_width,quad_segs=2)
+    green_areas_gdf = shapely.buffer(green_areas_gdf,-buffer,quad_segs=2)
+    green_areas_gdf = gpd.GeoDataFrame({},geometry=shapely.get_parts(green_areas_gdf),crs=crs)
 
-#     # green_areas_gdf = service_quality.service_type(green_areas_gdf,row_values=['park','forest','garden','grass','greenfield'])
-#     # green_areas_gdf = service_quality.merge_and_simplify_geometry(green_areas_gdf,buffer=5,min_width=10,simplify=1,min_area=200)
+    if intersected_geom is not None:
+        intersected_geom_union = (
+            intersected_geom
+            .to_crs(green_areas_gdf.crs)
+            .union_all()
+        )
+        geoms = list(green_areas_gdf.geometry)
+        shapely.prepare(geoms)
+        green_areas_gdf = green_areas_gdf[shapely.intersects(geoms, intersected_geom_union)]
 
-#     if pedestrian_graph is not None:
-#         edges_union = (
-#             ox.graph_to_gdfs(pedestrian_graph, nodes=False)
-#             .to_crs(green_areas_gdf.crs)
-#             .union_all()
-#         )
-#         geoms = list(green_areas_gdf.geometry)
-#         shapely.prepare(geoms)
-#         green_areas_gdf = green_areas_gdf[shapely.intersects(geoms, edges_union)]
-
-#     return green_areas_gdf.to_crs(bounds.crs)
+    return green_areas_gdf.to_crs(bounds.crs)
 
 
 def bus_stops(bounds):

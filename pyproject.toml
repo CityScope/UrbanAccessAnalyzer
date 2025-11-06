@@ -3,16 +3,13 @@ name = "UrbanAccessAnalyzer"
 version = "0.1.0"
 description = "Use graphs and OSM data to compute isochrones and accessibility to services"
 readme = "README.md"
-requires-python = ">=3.12"
-
+requires-python = ">=3.9"
 
 dependencies = [
     "geopandas>=1.0.0",
     "geopy>=2.4.1",
     "networkx>=3.5",
     "numpy>=1.22",
-    "osm2geojson>=0.2.6",
-    "osmnx>=2.0.5",
     "pandas>=2.2.0",
     "polars>=1.25.0",
     "pyarrow>=18.0.0",
@@ -22,19 +19,48 @@ dependencies = [
     "requests>=2.0.0",
     "scikit-image>=0.25.2",
     "scikit-learn>=1.5.0",
-    "scikit-image>=0.25.2",
     "shapely>=2.1.1",
     "tqdm>=4.0.0",
-    "streamlit>=1.50.0",
+]
+
+# ---- Optional Dependencies (extras) ----
+[project.optional-dependencies]
+
+# OpenStreetMaps
+osm = [
+    "osm2geojson>=0.2.6",
+    "osmnx>=2.0.5",
+]
+
+# H3 Uber hexagons
+h3 = [
+   "h3>=4.3.1", 
+]
+
+# All dependencies for visualization and mapping
+plot = [
     "matplotlib>=3.10.7",
+    "contextily>=1.6.0",
     "mapclassify>=2.10.0",
     "folium>=0.20.0",
     "streamlit-folium>=0.25.3",
+    "plotly>=5.24.0",
+    "seaborn>=0.13.2",
+    "streamlit>=1.50.0",
 ]
 
-[dependency-groups]
+# Optional extras for development or docs
 dev = [
     "pre-commit>=4.2.0",
+    "pytest>=8.0.0",
+    "black>=24.8.0",
+    "ruff>=0.6.0",
+]
+
+docs = [
+    "sphinx>=7.3.0",
+    "myst-parser>=3.0.1",
+    "furo>=2024.8.0",
 ]
 
 [build-system]

@@ -10,6 +10,54 @@ from itertools import repeat
 from tqdm import tqdm
 import warnings
 
+"""
+TODO: There is still a bug in the LoS graph and sometimes the values seem 
+to not reach long enaough maybe. 
+Or maybe it is right and the distance_matrix is the reason. This happened with the green areas.
+TODO: Add source node_id to the level_of_service info. 
+"""
+
+def default_distance_matrix(poi, distance_steps, service_quality_column="service_quality"):
+    """
+    Create a diagonal-like distance vs service_quality DataFrame and return unique levels.
+
+    Parameters
+    ----------
+    service_quality : list
+        Ordered list of service quality levels (best to worst), e.g., ['I','II','III'].
+    distance_steps : list
+        Ordered list of distance steps (best to worst), e.g., [250, 500, 1000].
+
+    Returns
+    -------
+    df : pandas.DataFrame
+        DataFrame with service_quality as rows, distance_steps as columns,
+        and letters ('A','B','C',...) forming a diagonal pattern.
+    level_of_services : list
+        Sorted list of unique letters used in the DataFrame.
+    """
+    service_quality = np.unique(poi[service_quality_column].dropna())
+    # Create letters for values
+    letters = list(string.ascii_uppercase)
+
+    # Initialize empty DataFrame
+    df = pd.DataFrame(index=service_quality, columns=distance_steps)
+
+    # Fill in diagonal pattern
+    for i, sq in enumerate(service_quality):
+        for j, dist in enumerate(distance_steps):
+            idx = min(i + j, len(letters) - 1)  # prevent out-of-range
+            df.at[sq, dist] = letters[idx]
+
+    # Extract unique letters used, sorted in order
+    level_of_services = sorted(df.stack().unique(), key=lambda x: letters.index(x))
+
+    df[service_quality_column] = df.index 
+    df = df.reset_index(drop=True)
+
+    return df, level_of_services
+
+
 def __distance_matrix_to_processing_order(distance_matrix, level_of_services):
     if isinstance(distance_matrix, list):
         distances = distance_matrix
@@ -463,13 +511,13 @@ def graph(
 
 
 def buffers(
-    points, distance_matrix, level_of_services, service_quality_col
+    service_geoms, distance_matrix, level_of_services, service_quality_col
 ):
-    if points.crs.is_geographic:
-        points = points.to_crs(points.estimate_utm_crs())
+    if service_geoms.crs.is_geographic:
+        service_geoms = service_geoms.to_crs(service_geoms.estimate_utm_crs())
 
     if service_quality_col is None:
-        points["__service_quality"] = 1
+        service_geoms["__service_quality"] = 1
         service_quality_col = "__service_quality"
 
     ls_process_order_df = __distance_matrix_to_processing_order(
@@ -490,7 +538,7 @@ def buffers(
         if isinstance(quality, int):
             quality = [quality]
 
-        selected_points = points[points[service_quality_col].isin(quality)]
+        selected_points = service_geoms[service_geoms[service_quality_col].isin(quality)]
         selected_points = selected_points.geometry.union_all().buffer(distance,resolution=4)
         buffers[level_of_service].append(selected_points)
 
@@ -510,6 +558,6 @@ def buffers(
         rows.append({'level_of_service': level_of_service, 'level_of_service_int': i, 'geometry': row_geom})
 
 
-    result = gpd.GeoDataFrame(rows, crs=points.crs)
+    result = gpd.GeoDataFrame(rows, crs=service_geoms.crs)
     return result.sort_values("level_of_service_int")
 

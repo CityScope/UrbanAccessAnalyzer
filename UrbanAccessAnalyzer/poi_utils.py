@@ -2,6 +2,7 @@ import pandas as pd
 import geopandas as gpd
 import numpy as np
 import warnings
+import string 
 
 
 def condense_rows(
@@ -56,7 +57,7 @@ def condense_rows(
     return service_type
 
 
-def by_values(values: list | pd.Series, value_priority: list):
+def quality_by_values(values: list | pd.Series, value_priority: list):
     # Convert values to list while preserving None/np.nan
     values = pd.Series(values)
     str_values = values.astype(str).where(~values.isna(), None)
@@ -101,7 +102,7 @@ def by_values(values: list | pd.Series, value_priority: list):
     return result.tolist()
 
 
-def by_area(gdf: gpd.GeoDataFrame | gpd.GeoSeries, area_steps: list):
+def quality_by_area(gdf: gpd.GeoDataFrame | gpd.GeoSeries, area_steps: list[float], large_is_better:bool=True):
     """
     Classify geometries by area thresholds defined in area_steps.
 
@@ -112,48 +113,43 @@ def by_area(gdf: gpd.GeoDataFrame | gpd.GeoSeries, area_steps: list):
     Returns:
         list: A list of class numbers corresponding to area bins.
     """
-    if len(area_steps) == 0:
-        raise Exception("No values in area_steps")
+    # Create the area column
+    gdf = gdf.copy()
+    gdf = gdf.to_crs(gdf.estimate_utm_crs())
+    gdf['area'] = gdf.geometry.area 
+    area_steps = np.unique(area_steps)
 
-    if len(gdf) == 0:
-        return []
+    for i in range(len(area_steps)):
+        j = len(area_steps) - i - 1
+        if large_is_better:
+            gdf.loc[gdf.geometry.area > area_steps[i], '_service_quality'] = j + 1
+        else:
+            gdf.loc[gdf.geometry.area > area_steps[j], '_service_quality'] = i + 1
+            
+    return list(gdf['_service_quality'])
 
-    # Convert to GeoSeries if needed
-    if isinstance(gdf, gpd.GeoDataFrame):
-        gdf = gdf.copy()
-    else:
-        gdf = gpd.GeoDataFrame({}, geometry=gdf.copy(), crs=gdf.crs)
 
-    # Project if not projected
-    if not gdf.crs.is_projected:
-        gdf = gdf.to_crs(gdf.estimate_utm_crs())
+def polygons_to_points(poi, street_edges):
+    poi_points = poi.copy()
+    if not (poi.geometry.type == 'Point').all():
+        poi_points['poi_id'] = poi.index 
+        polygons_bool = (
+            (
+                poi.geometry.type == 'Polygon'
+            ) | (
+                poi.geometry.type == 'MultiPolygon'
+            )
+        )
+        poi_points.loc[polygons_bool,'geometry'] = poi_points[polygons_bool].geometry.boundary
+        points_bool = (
+            (
+                poi.geometry.type == 'Point'
+            ) | (
+                poi.geometry.type == 'MultiPoint'
+            )
+        )
+        poi_points.loc[~points_bool,'geometry'] = poi_points[~points_bool].geometry.intersection(street_edges.union_all())
+        poi_points = poi_points[poi_points.geometry.is_empty == False] 
 
-    # Check sort order
-    ascending = area_steps == sorted(area_steps)
-    descending = area_steps == sorted(area_steps, reverse=True)
-
-    if not ascending and not descending:
-        warnings.warn("area_steps is not sorted.")
-
-    # Build class labels
-    if descending:
-        classes = np.arange(len(area_steps), 0, -1)
-    else:
-        classes = np.arange(1, len(area_steps) + 1)
-
-    gdf["class"] = None
-
-    areas = gdf.area
-
-    # Assign lowest class
-    gdf.loc[areas < area_steps[0], "class"] = classes[0]
-
-    # Assign highest class
-    gdf.loc[areas >= area_steps[-1], "class"] = classes[-1]
-
-    # Assign intermediate classes
-    for i in range(len(area_steps) - 1):
-        mask = (areas >= area_steps[i]) & (areas < area_steps[i + 1])
-        gdf.loc[mask, "class"] = classes[i + 1]
-
-    return gdf["class"].tolist()
+    poi_points = poi_points.explode().reset_index(drop=True)
+    return poi_points
