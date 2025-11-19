@@ -432,10 +432,10 @@ def vectorize(
 
     # AOI filtering
     if aoi is not None:
+        aoi = gpd.GeoDataFrame({},geometry=[aoi.to_crs(crs).union_all()],crs=crs)
         x_c, y_c = xy(transform, valid_rows + 0.5, valid_cols + 0.5, offset="center")
         points_gdf = gpd.GeoDataFrame(geometry=gpd.points_from_xy(x_c, y_c, crs=crs))
-        aoi_in_raster = aoi.to_crs(crs)
-        idx = points_gdf.sjoin(aoi_in_raster, how="inner", predicate="intersects").index
+        idx = points_gdf.sjoin(aoi, how="inner", predicate="intersects").index
         valid_rows, valid_cols = valid_rows[idx], valid_cols[idx]
 
         if valid_rows.size == 0:
