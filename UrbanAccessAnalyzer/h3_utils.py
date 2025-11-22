@@ -2,21 +2,37 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 import h3
-from shapely.geometry import Polygon, MultiPolygon
 import warnings
 import shapely 
 from rasterio.transform import Affine
 from rasterio.crs import CRS
 from . import raster_utils
 
+from shapely.geometry import (
+    Point, MultiPoint,
+    LineString, MultiLineString, LinearRing,
+    Polygon, MultiPolygon,
+    GeometryCollection
+)
+from shapely.ops import unary_union
+
 """TODO: using h3 h3shape_to_cells_experimental function so rasterize might break"""
+
+# Geometry groups
+polygon_types = ("Polygon", "MultiPolygon")
+point_types = ("Point",)
+buffer_types = ("LineString", "MultiLineString", "LinearRing", "MultiPoint")
+gc_type = "GeometryCollection"
+
 
 def from_gdf(
     geoms: gpd.GeoDataFrame,
     resolution: int,
     value_column: str | None = None,
-    value_order: list | str = 'max',
+    value_order: list | str | None = None,
     buffer: float = 0,
+    centroid: bool = False,
+    method: str = 'first'
 ) -> pd.DataFrame:
     """
     Rasterize vector geometries (GeoDataFrame) into H3 hexagonal cells.
@@ -56,10 +72,15 @@ def from_gdf(
     ...                         'class': [1]}, crs="EPSG:4326")
     >>> from_gdf(gdf, resolution=6, value_column='class')
     """
+    if method == 'max':
+        method = 'first' 
+    elif method == 'min':
+        method = 'last'
 
     # Copy to avoid modifying original GeoDataFrame
     geoms = geoms.copy()
     categorical = False
+
     #buffer += h3.average_hexagon_edge_length(resolution, unit='m') * 1.2
     if buffer > 0:
         if geoms.crs.is_geographic:
@@ -80,14 +101,15 @@ def from_gdf(
     else:
         order = list(np.unique(geoms[value_column]))
         if len(order) > (len(geoms) / 10):
+            value_order = None 
             categorical = False 
         else:
             categorical = True
             if value_order == 'min':
-                value_order = list(np.unique(geoms[value_column]))
+                value_order = order
                 value_order.reverse()
             elif value_order == 'max':
-                value_order = list(np.unique(geoms[value_column]))
+                value_order = order
             elif value_order is None:
                 value_order = order
             else:
@@ -97,69 +119,110 @@ def from_gdf(
         # Filter out any unexpected values not in value_order
         geoms = geoms[geoms[value_column].isin(value_order)]
 
+    if centroid:
+        geoms.geometry = geoms.geometry.centroid
+
     if categorical:
-        # Prepare results container
-        result = pd.DataFrame({value_column: value_order, "h3_cell": None})
-        # Loop over each value and compute union + H3 cells
-        for val in value_order:
-            subset = geoms[geoms[value_column] == val]
-            if subset.empty:
-                continue
-
-            # Merge all geometries into one
-            union_geom = subset.geometry.union_all()
-            # Apply buffering if requested
-            if buffer > 0:
-                union_geom = shapely.buffer(union_geom,buffer,quad_segs=2)
-                union_geom = gpd.GeoSeries([union_geom],crs=geoms.crs).to_crs(4326).union_all()
-                
-            if union_geom.is_empty:
-                continue
-
-            # Handle both single and multi geometries
-            if isinstance(union_geom, (Polygon, MultiPolygon)):
-                h3_cells = h3.h3shape_to_cells_experimental(h3.geo_to_h3shape(union_geom), res=resolution, contain='overlap')
-            else:
-                warnings.warn(f"Skipping a geometry that is not Polygon. Got: {type(union_geom)}")
-                continue
-
-            # Assign H3 cell list to result
-            result.loc[result[value_column] == val, "h3_cell"] = [list(h3_cells)]
+        result = geoms[[value_column,'geometry']].dissolve(value_column,as_index=False,sort=False)
     else:
         result = geoms[[value_column,'geometry']].copy()
-        if value_order is None:
-            value_order == 'max' 
 
-        if value_order == 'max':
-            result = result.sort_values(value_column,ascending=False)
-        elif value_order == 'min':
-            result = result.sort_values(value_column,ascending=True)
-        else:
-            raise Exception(f"Variable value_order {value_order} not valid for continuous data. Choose between 'max' or 'min'.")
+    result = result.reset_index(drop=True)
+    result["h3_cell"] = None
 
-        result = result.reset_index(drop=True)
-
-        if buffer > 0:
+    if buffer > 0:
+        if result.crs.is_geographic:
             result = result.to_crs(result.estimate_utm_crs())
-            result.geometry = result.geometry.buffer(buffer)
 
-        result = result.to_crs(4326)
+        result["geometry"] = result.geometry.buffer(buffer)
 
-        result['h3_cell'] = result.apply(
-            lambda row: h3.h3shape_to_cells_experimental(
-                h3.geo_to_h3shape(row['geometry']),
-                res=resolution,
-                contain='overlap'
-            ),
-            axis=1
+    mask_gc = result.geom_type == gc_type
+
+    if mask_gc.any():
+        result.loc[mask_gc, "geometry"] = (
+            result.loc[mask_gc, "geometry"]
+            .apply(lambda g: unary_union([geom for geom in g.geoms if not geom.is_empty]))
         )
-        result = result.drop(columns=['geometry'])
+
+    mask_buffer = result.geom_type.isin(buffer_types)
+
+    if mask_buffer.any():
+        # Ensure correct CRS for buffering small distances
+        if result.crs.is_geographic:
+            result = result.to_crs(result.estimate_utm_crs())
+
+        result.loc[mask_buffer, "geometry"] = (
+            result.loc[mask_buffer, "geometry"].buffer(0.01)
+        )
+
+    result = result.to_crs(4326)
+
+    mask_polygons = result.geom_type.isin(polygon_types)
+
+    if mask_polygons.any():
+        result.loc[mask_polygons, "h3_cell"] = (
+            result.loc[mask_polygons]
+            .apply(
+                lambda row: h3.h3shape_to_cells_experimental(
+                    h3.geo_to_h3shape(row.geometry),
+                    res=resolution,
+                    contain="overlap",
+                ),
+                axis=1,
+            )
+        )
+
+    mask_points = result.geom_type.isin(point_types)
+
+    if mask_points.any():
+        result.loc[mask_points, "h3_cell"] = (
+            result.loc[mask_points]
+            .apply(
+                lambda row: [
+                    h3.h3shape_to_cells(
+                    h3.geo_to_h3shape(row.geometry),
+                    res=resolution,
+                )],
+                axis=1,
+            )
+        )
 
     result = result.explode('h3_cell')
-    result = result.reset_index(drop=True).dropna()
-    result = result.drop_duplicates('h3_cell',keep='first')
+    result = result.dropna().reset_index(drop=True)
+    
+    if (value_order is not None) and (len(value_order) > 0):
+        mapping = {v: i for i, v in enumerate(value_order)}
+        result[f"{value_column}_int"] = result[value_column].map(mapping).where(
+            result[value_column].isin(value_order), len(value_order)
+        )
+        result = result.sort_values(f"{value_column}_int").drop(columns=[f"{value_column}_int"])
+    else:
+        result = result.sort_values(value_column)
 
-    return result
+    if method == 'first':
+        result = result.drop_duplicates('h3_cell',keep='first')
+    elif method == 'last':
+        result = result.drop_duplicates('h3_cell',keep='last')
+    elif method == 'mean':
+        result = result.groupby("h3_cell").agg({value_column: "mean"}).reset_index()
+    elif method == 'sum':
+        result = result.groupby("h3_cell").agg({value_column: "sum"}).reset_index()
+    elif method == 'density':
+        if result.crs.is_geographic:
+            result = result.to_crs(result.estimate_utm_crs())
+
+        total = geoms[value_column].sum()
+        result['density'] = result[value_column] / result.area 
+        result = result.groupby("h3_cell").agg({value_column: "mean"}).reset_index()
+        result['cell_area'] = result['h3_cell'].apply(lambda x: h3.cell_area(x, unit='m^2'))
+        result[value_column] *= result['cell_area']
+        result[value_column] *= total/result[value_column].sum()
+    
+    result = result[[value_column,'h3_cell']]
+    if 'geometry' in result.columns:
+        result = result.drop(columns='geometry')
+        
+    return result.dropna().reset_index(drop=True)
 
 
 def from_raster(
@@ -168,9 +231,19 @@ def from_raster(
     resolution:int=10,
     transform: Affine|None=None,
     crs: CRS|None=None,
+    method:str = 'density',
+    nodata=None,
 ):
     if isinstance(raster,str):
-        raster, transform, crs = raster_utils.read_raster(raster,aoi=aoi)
+        raster, transform, crs = raster_utils.read_raster(raster,aoi=aoi,nodata=nodata)
+        gdf = raster_utils.vectorize(
+            raster_array = raster,
+            transform = transform,
+            crs = crs,
+            aoi = None,
+            keep_nodata = False,
+            nodata = nodata,
+        )
     else:
         if aoi is not None:
             warnings.warn("aoi cropping is not allowed when passing a loaded raster. Pass the raster path.")
@@ -178,18 +251,20 @@ def from_raster(
         if (transform is None) or (crs is None):
             raise Exception("If inputing a raster array keywords transform and crs are mandatory.")
         
-    gdf = raster_utils.vectorize(
-        raster_array = raster,
-        transform = transform,
-        crs = crs,
-        aoi = aoi,
-        min_value = 0,
-        keep_nodata = False,
-        nodata = 0,
-    )
-    gdf = gdf.loc[gdf['value'] > 0]
-    gdf = gdf.rename(columns={'value':'population'})
-    return from_gdf(gdf,resolution=resolution,value_column='population',)
+        gdf = raster_utils.vectorize(
+            raster_array = raster,
+            transform = transform,
+            crs = crs,
+            aoi = aoi,
+            keep_nodata = False,
+            nodata = None,
+        )
+
+    gdf = gdf.dropna(subset=['value']).reset_index(drop=True)
+
+    df = from_gdf(gdf,resolution=resolution,value_column='value',method=method)
+
+    return df 
 
 def h3_to_gdf(df,h3_column='h3_cell'):
     df = df.copy()

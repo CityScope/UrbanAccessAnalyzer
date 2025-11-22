@@ -250,10 +250,14 @@ def reproject_global(
 def raster_crop(
     src_input: Union[str, Path, rio.io.DatasetReader],
     aoi: Optional[Union[gpd.GeoDataFrame, gpd.GeoSeries]] = None,
-    nodata: float = np.nan,
+    nodata: float | None = np.nan,
     projected: bool = False
 ) -> Tuple[np.ndarray, Affine, CRS, int, int]:
     _src = None
+
+    if nodata is None:
+        nodata = np.nan 
+        
     if isinstance(src_input, (str, Path)):
         file_path = Path(src_input)
         if not file_path.exists():
@@ -323,7 +327,7 @@ def raster_crop(
             _src.close()
 
 
-def read_raster(path: Union[str, Path], aoi: Optional[Union[gpd.GeoDataFrame, gpd.GeoSeries]] = None, nodata: float = np.nan, projected:bool=False) -> Tuple[np.ndarray, Affine, CRS]:
+def read_raster(path: Union[str, Path], aoi: Optional[Union[gpd.GeoDataFrame, gpd.GeoSeries]] = None, nodata: float | None = np.nan, projected:bool=False) -> Tuple[np.ndarray, Affine, CRS]:
     """
     Reads a raster from a given path, optionally crops it to an AOI, and
     reprojects it to UTM if its native CRS is geographic.
@@ -355,7 +359,6 @@ def vectorize(
     transform: Affine,
     crs: CRS,
     aoi: Optional[Union[gpd.GeoDataFrame, gpd.GeoSeries]] = None,
-    min_value: Optional[float] = None,
     keep_nodata: bool = False,
     nodata: Optional[Union[float, int, str]] = None,
 ) -> gpd.GeoDataFrame:
@@ -378,9 +381,6 @@ def vectorize(
         The CRS of the raster_array.
     aoi : Optional[gpd.GeoDataFrame | gpd.GeoSeries], optional
         Area of interest. If provided, only pixels intersecting the AOI are included.
-    min_value : Optional[float], optional
-        Threshold for numeric arrays. If keep_nodata=True, values <= min_value become None,
-        else they are excluded. Ignored for str arrays.
     keep_nodata : bool, default=False
         If True, nodata pixels (NaN, explicit nodata, or '') are included with value=None.
     nodata : float | int | str, optional
@@ -414,17 +414,18 @@ def vectorize(
     if keep_nodata:
         valid_mask = np.ones_like(rows, dtype=bool)
     else:
-        if dtype_kind == "f":  # float
-            valid_mask = ~np.isnan(raster_array)
-        elif dtype_kind in {"U", "S", "O"}:  # string
-            mask_nan = raster_array == nodata if nodata is not np.nan else np.zeros_like(raster_array, dtype=bool)
+        if dtype_kind in {"U", "S", "O"}:  # string
+            if nodata is None:
+                mask_nan = np.isnan(raster_array)
+            else:
+                mask_nan = raster_array == nodata if nodata is not np.nan else np.zeros_like(raster_array, dtype=bool)
+            
             mask_empty = raster_array == ""  # always nodata
             valid_mask = ~(mask_nan | mask_empty)
+        elif nodata is None:
+            valid_mask = ~np.isnan(raster_array) 
         else:  # numeric (already cast ints to float, handled above)
-            valid_mask = raster_array != nodata
-
-        if min_value is not None and np.issubdtype(raster_array.dtype, np.number):
-            valid_mask &= raster_array > min_value
+            valid_mask = (raster_array != nodata) & ~np.isnan(raster_array)
 
     valid_rows, valid_cols = np.where(valid_mask)
     if valid_rows.size == 0:
@@ -460,8 +461,6 @@ def vectorize(
 
         if dtype_kind == "f":
             mask |= np.isnan(pixel_values)
-            if min_value is not None:
-                mask |= pixel_values <= min_value
         elif dtype_kind in {"U", "S", "O"}:
             mask |= pixel_values == ""
             if isinstance(nodata, str):
@@ -469,8 +468,6 @@ def vectorize(
         else:
             if nodata is not None:
                 mask |= pixel_values == nodata
-            if min_value is not None:
-                mask |= pixel_values <= min_value
 
         pixel_values = np.where(mask, None, pixel_values)
 
