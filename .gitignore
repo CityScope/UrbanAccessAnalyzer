@@ -22,4 +22,12 @@ build/
 examples/
 no_sync/
 
-tutorials/**
+# Ignore everything in examples/
+examples/**
+
+# BUT include files directly inside examples/ (no subfolders)
+!examples/*
+examples/*/
+
+# Exclude files that start with "local" (both .py and .ipynb or any extension)
+examples/local*
