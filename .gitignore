@@ -19,7 +19,6 @@ docs/build/
 dist/
 build/
 
-examples/
 no_sync/
 
 # Ignore everything in examples/
