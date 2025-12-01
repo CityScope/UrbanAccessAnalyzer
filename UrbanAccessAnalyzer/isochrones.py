@@ -467,7 +467,7 @@ def graph(
     service_quality_col=None,
     level_of_services=None,
     min_edge_length=0,
-    max_dist=None
+    max_dist=None,
 ):
     if service_quality_col is None:
         points['service_quality_col'] = 1 
