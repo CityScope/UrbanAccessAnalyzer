@@ -1,12 +1,17 @@
+import sys 
+sys.path.append('/home/miguel/Documents/Proyectos/PTLevelofService/accessibility/UrbanAccessAnalyzer')
+
 import os 
 import json
 import argparse
 
 import geopandas as gpd 
+import pandas as pd
 import pyogrio
 import shapely 
 from shapely import wkt
 import osmnx as ox 
+import warnings 
 
 import UrbanAccessAnalyzer.isochrones as isochrones
 import UrbanAccessAnalyzer.graph_processing as graph_processing
@@ -20,7 +25,6 @@ parser.add_argument('--poi_file', type=str, required=True, help='Path to file co
 parser.add_argument('--poi_quality_column', type=str, default=None, help='Column or columns in poi_file dataframe with info about poi quality. Pois are grouped based on this column.')
 parser.add_argument('--output_path', type=str, required=True, help='Path to save outputs.')
 parser.add_argument('--street_path', type=str, default=None, help='Path to download and search for street files.')
-parser.add_argument('--population_path', type=str, default=None, help='Path to download and search for population files.')
 parser.add_argument('--aoi', type=str, default=None, help='Area of interest')
 parser.add_argument('--min_edge_length', type=int, default=30, help='Edges less long than this are collapsed into one node.')
 parser.add_argument('--h3_resolution', type=int, default=11, help='Resolution for h3 cells.')
@@ -36,7 +40,6 @@ parser.add_argument(
     help='Overwrite all existing files. Default is False.'
 )
 
-
 # Parse all arguments
 args = parser.parse_args()
 
@@ -45,10 +48,6 @@ output_path = args.output_path
 street_path = args.street_path
 if street_path is None:
     street_path = output_path
-
-population_path = args.population_path
-if population_path is None:
-    population_path = output_path 
 
 poi_quality_column = args.poi_quality_column
 if poi_quality_column is not None:
@@ -75,9 +74,7 @@ h3_resolution = args.h3_resolution
 distance_steps = json.loads(args.distance_steps)
 
 do_h3 = args.h3
-do_population = args.population
 overwrite = args.overwrite
-
 
 # aoi 
 if args.aoi is None:
@@ -102,13 +99,16 @@ else:
 aoi_download = aoi_download.intersection(shapely.buffer(poi.union_all(),max(distance_steps)))
 
 poi['_service_quality'] = (
-    poi[poi_quality_column]
-    .astype(str)
-    .agg('_-_'.join, axis=1)
+    poi[poi_quality_column]              
+    .apply(lambda row: '_-_'.join(
+        f"{col}_{row[col]}"
+        for col in poi_quality_column
+    ), axis=1)
 )
 
 osm_xml_file = os.path.normpath(output_path+f"/streets.osm")
-streets_graph_path = os.path.normpath(output_path+f"/streets.graphml")
+street_nodes_path = os.path.normpath(output_path+f"/street_nodes.gpkg")
+street_edges_path = os.path.normpath(output_path+f"/street_edges.gpkg")
 level_of_service_streets_path = os.path.normpath(output_path+f"/level_of_service_streets.gpkg")
 h3_results_path = os.path.normpath(output_path+f"/h3.csv")
 
@@ -124,19 +124,27 @@ osm.geofabrik_to_osm(
     overwrite=False
 )
 
+if overwrite or (not os.path.isfile(street_edges_path)):
+    # Load
+    G = ox.graph_from_xml(osm_xml_file)
+    # Project geometry coordinates to UTM system to allow euclidean meassurements in meters (sorry americans)
+    G = ox.project_graph(G,to_crs=aoi.estimate_utm_crs())
+    # street_nodes, street_edges = ox.graph_to_gdfs(G)
+    # street_nodes.to_file(street_nodes_path)
+    # street_edges.to_file(street_edges_path)
 
-# Load
-G = ox.graph_from_xml(osm_xml_file)
-# Project geometry coordinates to UTM system to allow euclidean meassurements in meters (sorry americans)
-G = ox.project_graph(G,to_crs=aoi.estimate_utm_crs())
-# Save the graph in graphml format to avoid the slow loading process
-ox.save_graphml(G,streets_graph_path)
+    G = graph_processing.simplify_graph(G,min_edge_length=min_edge_length,min_edge_separation=min_edge_length*2,undirected=True)
+    street_nodes, street_edges = ox.graph_to_gdfs(G)
+    street_nodes.reset_index().to_file(street_nodes_path)
+    street_edges.reset_index().to_file(street_edges_path)
+else:
+    street_nodes = gpd.read_file(street_nodes_path)
+    street_nodes = street_nodes.set_index(["osmid"])
+    street_edges = gpd.read_file(street_edges_path)
+    street_edges = street_edges.set_index(["u", "v", "key"])
+    G = ox.graph_from_gdfs(street_nodes,street_edges)
+    G = ox.project_graph(G,to_crs=aoi.estimate_utm_crs())
 
-G = graph_processing.simplify_graph(G,min_edge_length=min_edge_length,min_edge_separation=min_edge_length*2,undirected=True)
-# Save the result in graphml format
-ox.save_graphml(G,streets_graph_path)
-
-street_edges = ox.graph_to_gdfs(G,nodes=False)
 street_edges = street_edges.to_crs(aoi.crs)
 
 if (poi.geometry.type == 'Point').all():
@@ -156,34 +164,48 @@ poi_points_gdf['osmid'] = osmids # Add the ids of the nodes in the graph to poin
 poi_points_gdf = poi_points_gdf.dropna(subset=['osmid'])
 
 ls_columns = []
+level_of_service_graph = G.copy()
 for quality_str in poi_points_gdf['_service_quality'].unique():
-    ls_columns.append(quality_str)
+    warnings.warn(quality_str)
     poi_selection = poi_points_gdf[poi_points_gdf['_service_quality'] == quality_str]
+    if len(poi_selection) == 0:
+        continue
+
+    distance_matrix = {
+        "service_quality": [quality_str],
+    }
+    level_of_services = []
+    for d in distance_steps:
+        distance_matrix[d] = [str(d)]
+        level_of_services.append(str(d))
+
+    distance_matrix = pd.DataFrame(distance_matrix)
     level_of_service_graph = isochrones.graph(
-        level_of_service_graph,
-        poi_points_gdf,
-        distance_steps,
-        service_quality_col = None, # If all points have the same quality this could be None
-        level_of_services = distance_steps, # could be None and it will set to the sorted unique values of the matrix
+        G=level_of_service_graph,
+        points=poi_points_gdf,
+        distance_matrix=distance_matrix,
+        service_quality_col = '_service_quality', # If all points have the same quality this could be None
+        level_of_services = level_of_services, # could be None and it will set to the sorted unique values of the matrix
         min_edge_length = min_edge_length, # Do not add new nodes if there will be an edge with less than this length
     )
     # Save edges as gpkg
     level_of_service_nodes, level_of_service_edges = ox.graph_to_gdfs(level_of_service_graph)
-    level_of_service_nodes = level_of_service_nodes.rename(columns={'level_of_service':f'ls_{quality_str}'})
-    level_of_service_edges = level_of_service_edges.rename(columns={'level_of_service':f'ls_{quality_str}'})
+    level_of_service_nodes = level_of_service_nodes.rename(columns={'level_of_service':quality_str})
+    level_of_service_edges = level_of_service_edges.rename(columns={'level_of_service':quality_str})
     if is_point == False:
         level_of_service_nodes.loc[
-            level_of_service_nodes.intersects(poi_selection.to_crs(level_of_service_nodes.crs).union_all()),f'ls_{quality_str}'
+            level_of_service_nodes.intersects(poi_selection.to_crs(level_of_service_nodes.crs).union_all()),quality_str
         ] = min(distance_steps)
         level_of_service_edges.loc[
-            level_of_service_edges.intersects(poi_selection.to_crs(level_of_service_edges.crs).union_all()),f'ls_{quality_str}'
+            level_of_service_edges.intersects(poi_selection.to_crs(level_of_service_edges.crs).union_all()),quality_str
         ] = min(distance_steps)
 
     level_of_service_graph = ox.graph_from_gdfs(level_of_service_nodes, level_of_service_edges)
-
+    if quality_str in level_of_service_edges.columns:
+        ls_columns.append(quality_str)
 
 level_of_service_nodes, level_of_service_edges = ox.graph_to_gdfs(level_of_service_graph)
-level_of_service_edges.to_file(level_of_service_streets_path)
+level_of_service_edges.reset_index().to_file(level_of_service_streets_path)
 
 if do_h3:
     aoi['id'] = 0

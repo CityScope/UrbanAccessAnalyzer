@@ -240,7 +240,9 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
 
     nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
     remaining_dist_cols = [
-        c for c in nodes_gdf.columns if c.startswith("remaining_dist_")
+        c for c in nodes_gdf.columns
+        if (c.startswith("remaining_dist_")
+            and (c.removeprefix("remaining_dist_") in level_of_services))
     ]
 
     level_of_services = [
@@ -379,7 +381,6 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
         dist_v = new_dist_v
 
     edges_border_gdf = edges_gdf.copy()
-
     remaining_dist_cols_u_v = [i + "_u" for i in remaining_dist_cols] + [
         i + "_v" for i in remaining_dist_cols
     ]
@@ -408,41 +409,43 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
     projected_dist = values[row_idx, col_idx]
 
     edges_border_gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs=edges_gdf.crs)
-    edges_border_gdf["level_of_service"] = sources
-    edges_border_gdf["level_of_service"] = edges_border_gdf.apply(
-        lambda row: row[f'last_level_of_service_{row["level_of_service"]}'], axis=1
-    )
-    edges_border_gdf = edges_border_gdf.drop(
-        columns=[
-            col.replace("remaining_dist_", "last_level_of_service_")
-            for col in remaining_dist_cols_u_v
-        ]
-    )
-    edges_border_gdf["projected_dist"] = projected_dist
+    if len(edges_border_gdf) > 0:
+        edges_border_gdf["level_of_service"] = sources
+        edges_border_gdf["level_of_service"] = edges_border_gdf.apply( 
+            lambda row: row[f'last_level_of_service_{row["level_of_service"]}'], axis=1
+        )
+        edges_border_gdf = edges_border_gdf.drop(
+            columns=[
+                col.replace("remaining_dist_", "last_level_of_service_")
+                for col in remaining_dist_cols_u_v
+            ]
+        )
+        edges_border_gdf["projected_dist"] = projected_dist
 
-    edges_border_gdf["point"] = edges_border_gdf.interpolate(
-        edges_border_gdf["projected_dist"]
-    )
-    edges_border_gdf["length"] = edges_border_gdf["projected_dist"]
+        edges_border_gdf["point"] = edges_border_gdf.interpolate(
+            edges_border_gdf["projected_dist"]
+        )
+        edges_border_gdf["length"] = edges_border_gdf["projected_dist"]
 
-    min_id = nodes_gdf["osmid"].max()
-    min_id = max(min_id,edges_gdf['u'].max())
-    min_id = max(min_id,edges_gdf['v'].max())
-    min_id += 1 
-    new_border_node_ids = list(min_id + np.arange(0, len(edges_border_gdf)))
-    edges_border_gdf["new_node_id"] = new_border_node_ids
+        min_id = nodes_gdf["osmid"].max()
+        min_id = max(min_id,edges_gdf['u'].max())
+        min_id = max(min_id,edges_gdf['v'].max())
+        min_id += 1 
+        new_border_node_ids = list(min_id + np.arange(0, len(edges_border_gdf)))
+        edges_border_gdf["new_node_id"] = new_border_node_ids
 
-    edges_border_gdf["u"] = edges_border_gdf["u"].astype(int)
-    edges_border_gdf["v"] = edges_border_gdf["v"].astype(int)
-    edges_border_gdf["key"] = edges_border_gdf["key"].astype(int)
-    edges_border_gdf = edges_border_gdf.set_index(["u", "v", "key"])
+        edges_border_gdf["u"] = edges_border_gdf["u"].astype(int)
+        edges_border_gdf["v"] = edges_border_gdf["v"].astype(int)
+        edges_border_gdf["key"] = edges_border_gdf["key"].astype(int)
+        edges_border_gdf = edges_border_gdf.set_index(["u", "v", "key"])
 
     nodes_gdf = nodes_gdf.set_index("osmid")
     edges_gdf = edges_gdf.set_index(["u", "v", "key"])
 
-    nodes_gdf, edges_gdf = graph_processing.__split_at_edges(
-        nodes_gdf, edges_gdf, edges_border_gdf
-    )
+    if len(edges_border_gdf) > 0:
+        nodes_gdf, edges_gdf = graph_processing.__split_at_edges(
+            nodes_gdf, edges_gdf, edges_border_gdf
+        )
 
     edges_gdf, nodes_gdf = __set_edge_level_of_service(
         nodes_gdf,
