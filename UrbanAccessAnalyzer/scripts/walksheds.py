@@ -211,7 +211,7 @@ level_of_service_edges.reset_index().to_file(level_of_service_streets_path)
 if do_h3:
     aoi['id'] = 0
     ls_h3_df = h3_utils.from_gdf(aoi,value_column='id',value_order = [0], resolution=h3_resolution, method='first')
-    ls_h3_df = ls_h3_df.index.drop_duplicates()
+    ls_h3_df.index = ls_h3_df.index.drop_duplicates()
     ls_h3_df = ls_h3_df.drop(columns=ls_h3_df.columns)
 
     for column in ls_columns:

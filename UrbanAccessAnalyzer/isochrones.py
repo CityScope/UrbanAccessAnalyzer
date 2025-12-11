@@ -183,38 +183,77 @@ def __compute_isochrones(G, points, ls_process_order_df, service_quality_col=Non
 def __set_edge_level_of_service(
     nodes_gdf, edges_gdf, priority_map, max_priority_map, priority_map_rev
 ):
+    """
+    Normalize, combine, and restore level_of_service values on nodes and edges.
+    Ensures no 'nan', 'None' or np.nan leaks into the final output.
+    """
+
+    # ---- Ensure maps handle all possible NaN representations ----
+    priority_map = priority_map.copy()
+    priority_map_rev = priority_map_rev.copy()
+
+    # Inputs may contain these → treat all as missing
+    bad_keys = [np.nan, "nan", "None", None]
+
+    for k in bad_keys:
+        priority_map[k] = str(max_priority_map + 1)
+
+    # Reverse map: fallback numeric → None
+    priority_map_rev[str(max_priority_map + 1)] = None
+    for k in ["nan", "None", np.nan, None]:
+        priority_map_rev[str(k) if not isinstance(k, float) else "nan"] = None
+
+    # ---- Work on copies ----
     nodes_gdf = nodes_gdf.reset_index().copy()
+
+    # ---- Normalize edge LOS if column exists ----
     if "level_of_service" in edges_gdf.columns:
         edges_gdf["level_of_service"] = (
-            edges_gdf["level_of_service"].astype(str).replace(priority_map)
+            edges_gdf["level_of_service"]
+            .astype(str)
+            .replace(priority_map)
         )
+
         edges_gdf["level_of_service"] = edges_gdf["level_of_service"].fillna(
             str(max_priority_map + 1)
         )
+
         edges_gdf["level_of_service"] = edges_gdf["level_of_service"].astype(int)
+
     else:
         edges_gdf["level_of_service"] = max_priority_map + 1
 
-    nodes_gdf["level_of_service"] = nodes_gdf["level_of_service"].astype(str).replace(priority_map)
+    # ---- Normalize node LOS ----
+    nodes_gdf["level_of_service"] = (
+        nodes_gdf["level_of_service"]
+        .astype(str)
+        .replace(priority_map)
+    )
+
     nodes_gdf["level_of_service"] = nodes_gdf["level_of_service"].fillna(
         str(max_priority_map + 1)
     )
+
     nodes_gdf["level_of_service"] = nodes_gdf["level_of_service"].astype(int)
+
+    # ---- Merge node LOS into edges ----
     edges_gdf = edges_gdf.reset_index()
+
     edges_gdf = edges_gdf.merge(
-        nodes_gdf[["osmid", "level_of_service"]].rename(
-            columns={"osmid": "u", "level_of_service": "level_of_service_u"}
-        ),
+        nodes_gdf[["osmid", "level_of_service"]]
+        .rename(columns={"osmid": "u", "level_of_service": "level_of_service_u"}),
         on="u",
         how="left",
     )
+
     edges_gdf = edges_gdf.merge(
-        nodes_gdf[["osmid", "level_of_service"]].rename(
-            columns={"osmid": "v", "level_of_service": "level_of_service_v"}
-        ),
+        nodes_gdf[["osmid", "level_of_service"]]
+        .rename(columns={"osmid": "v", "level_of_service": "level_of_service_v"}),
         on="v",
         how="left",
     )
+
+    # ---- Compute edge LOS as minimum ----
     edges_gdf["level_of_service"] = (
         edges_gdf[["level_of_service_u", "level_of_service_v", "level_of_service"]]
         .min(axis=1)
@@ -223,15 +262,34 @@ def __set_edge_level_of_service(
 
     edges_gdf = edges_gdf.drop(columns=["level_of_service_u", "level_of_service_v"])
 
+    # ---- Map integer priorities back to original values ----
     edges_gdf["level_of_service"] = (
-        edges_gdf["level_of_service"].astype(str).replace(priority_map_rev)
+        edges_gdf["level_of_service"]
+        .astype(str)
+        .replace(priority_map_rev)
     )
-    edges_gdf = edges_gdf.set_index(["u", "v", "key"])
 
     nodes_gdf["level_of_service"] = (
-        nodes_gdf["level_of_service"].astype(str).replace(priority_map_rev)
+        nodes_gdf["level_of_service"]
+        .astype(str)
+        .replace(priority_map_rev)
     )
-    nodes_gdf = nodes_gdf.set_index(["osmid"])
+
+    # ---- Final cleaning: remove any 'nan'/'None' strings and unify missing values ----
+
+    def _clean(series):
+        series = series.replace({"nan": None, "None": None})
+        # Convert np.nan/pd.NA to Python None
+        series = series.where(series.notna(), None)
+        return series.astype(object)
+
+    edges_gdf["level_of_service"] = _clean(edges_gdf["level_of_service"])
+    nodes_gdf["level_of_service"] = _clean(nodes_gdf["level_of_service"])
+
+    # ---- Restore indices ----
+    edges_gdf = edges_gdf.set_index(["u", "v", "key"])
+    nodes_gdf = nodes_gdf.set_index("osmid")
+
     return edges_gdf, nodes_gdf
 
 
@@ -291,12 +349,8 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
 
     max_priority_map = len(level_of_services)
     priority_map = {val: str(i) for i, val in enumerate(level_of_services)}
-    priority_map["nan"] = str(max_priority_map + 1)
-    priority_map["None"] = str(max_priority_map + 1)
     priority_map_rev = {str(i): val for i, val in enumerate(level_of_services)}
     priority_map_rev[str(max_priority_map + 1)] = None
-    priority_map_rev["nan"] = None
-    priority_map_rev["None"] = None
 
     edges_gdf[f"last_level_of_service_{level_of_services[-1]}_u"] = None
     edges_gdf[f"last_level_of_service_{level_of_services[-1]}_v"] = None
