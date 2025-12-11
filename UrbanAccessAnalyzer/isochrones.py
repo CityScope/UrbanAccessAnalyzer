@@ -112,7 +112,7 @@ def __distance_matrix_to_processing_order(distance_matrix, level_of_services):
     return ls_process_order_df
 
 
-def __compute_isochrones(G, points, ls_process_order_df, service_quality_col=None):
+def __compute_isochrones(G, points, ls_process_order_df, service_quality_col=None, verbose:bool=True):
     H = G.copy()
     if service_quality_col is None:
         points["__service_quality"] = 1
@@ -123,6 +123,7 @@ def __compute_isochrones(G, points, ls_process_order_df, service_quality_col=Non
             index=False, name=None
         ),
         total=len(ls_process_order_df),
+        disable=not verbose,
     ):
         if isinstance(quality, int):
             quality = [quality]
@@ -194,7 +195,7 @@ def __set_edge_level_of_service(
     else:
         edges_gdf["level_of_service"] = max_priority_map + 1
 
-    nodes_gdf["level_of_service"] = nodes_gdf["level_of_service"].replace(priority_map)
+    nodes_gdf["level_of_service"] = nodes_gdf["level_of_service"].astype(str).replace(priority_map)
     nodes_gdf["level_of_service"] = nodes_gdf["level_of_service"].fillna(
         str(max_priority_map + 1)
     )
@@ -289,11 +290,13 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
     nodes_gdf = nodes_gdf.drop(columns=remaining_dist_cols)
 
     max_priority_map = len(level_of_services)
-    priority_map_rev = {str(i): val for i, val in enumerate(level_of_services)}
     priority_map = {val: str(i) for i, val in enumerate(level_of_services)}
-    priority_map_rev[str(max_priority_map + 1)] = None
     priority_map["nan"] = str(max_priority_map + 1)
     priority_map["None"] = str(max_priority_map + 1)
+    priority_map_rev = {str(i): val for i, val in enumerate(level_of_services)}
+    priority_map_rev[str(max_priority_map + 1)] = None
+    priority_map_rev["nan"] = None
+    priority_map_rev["None"] = None
 
     edges_gdf[f"last_level_of_service_{level_of_services[-1]}_u"] = None
     edges_gdf[f"last_level_of_service_{level_of_services[-1]}_v"] = None
@@ -471,6 +474,7 @@ def graph(
     level_of_services=None,
     min_edge_length=0,
     max_dist=None,
+    verbose:bool=True
 ):
     if service_quality_col is None:
         points['service_quality_col'] = 1 
@@ -501,6 +505,7 @@ def graph(
         points=points,
         ls_process_order_df=ls_process_order_df,
         service_quality_col=service_quality_col,
+        verbose=verbose
     )
 
     H = __exact_isochrones(
@@ -514,7 +519,7 @@ def graph(
 
 
 def buffers(
-    service_geoms, distance_matrix, level_of_services, service_quality_col
+    service_geoms, distance_matrix, level_of_services, service_quality_col, verbose:bool=True
 ):
     if service_geoms.crs.is_geographic:
         service_geoms = service_geoms.to_crs(service_geoms.estimate_utm_crs())
@@ -537,6 +542,7 @@ def buffers(
             index=False, name=None
         ),
         total=len(ls_process_order_df),
+        disable=not verbose,
     ):
         if isinstance(quality, int):
             quality = [quality]

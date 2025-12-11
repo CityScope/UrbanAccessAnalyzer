@@ -187,6 +187,7 @@ for quality_str in poi_points_gdf['_service_quality'].unique():
         service_quality_col = '_service_quality', # If all points have the same quality this could be None
         level_of_services = level_of_services, # could be None and it will set to the sorted unique values of the matrix
         min_edge_length = min_edge_length, # Do not add new nodes if there will be an edge with less than this length
+        verbose=False
     )
     # Save edges as gpkg
     level_of_service_nodes, level_of_service_edges = ox.graph_to_gdfs(level_of_service_graph)
@@ -209,18 +210,19 @@ level_of_service_edges.reset_index().to_file(level_of_service_streets_path)
 
 if do_h3:
     aoi['id'] = 0
-    ls_h3_df = h3_utils.from_gdf(aoi,value_column='id',value_order = [0], resolution=h3_resolution)
-    ls_h3_df = ls_h3_df[['h3_cell']].drop_duplicates().reset_index(drop=True)
+    ls_h3_df = h3_utils.from_gdf(aoi,value_column='id',value_order = [0], resolution=h3_resolution, method='first')
+    ls_h3_df = ls_h3_df.index.drop_duplicates()
+    ls_h3_df = ls_h3_df.drop(columns=ls_h3_df.columns)
 
     for column in ls_columns:
         new_ls_h3_df = h3_utils.from_gdf(
-            level_of_service_edges,
+            level_of_service_edges[[column,'geometry']],
             resolution=h3_resolution,
             value_column=column,
             value_order=distance_steps,
-            buffer=10
+            buffer=10,
+            method='first'
         )
-        ls_h3_df = ls_h3_df.merge(new_ls_h3_df,on='h3_cell',how='left')
+        ls_h3_df[column] = new_ls_h3_df[column]
 
-
-    ls_h3_df.to_csv(h3_results_path)
+    ls_h3_df.reset_index().to_csv(h3_results_path)

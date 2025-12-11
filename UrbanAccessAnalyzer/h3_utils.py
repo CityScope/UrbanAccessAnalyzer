@@ -95,6 +95,7 @@ def from_gdf(
         value_order = [0]
         categorical = True
 
+    geoms = geoms[[value_column,'geometry']].dropna()
     # Infer order if not provided
     if isinstance(value_order,list):
         categorical = True 
@@ -117,6 +118,10 @@ def from_gdf(
 
     if categorical == True:
         # Filter out any unexpected values not in value_order
+        geoms[value_column] = geoms[value_column].astype(str)
+        geoms.loc[(geoms[value_column] == 'nan') | (geoms[value_column] == 'None'), value_column] = None
+        geoms = geoms.dropna(subset=[value_column])
+        value_order = [str(i) for i in value_order]
         geoms = geoms[geoms[value_column].isin(value_order)]
 
     if centroid:
@@ -222,7 +227,7 @@ def from_gdf(
     if 'geometry' in result.columns:
         result = result.drop(columns='geometry')
         
-    return result.dropna().reset_index(drop=True)
+    return result.dropna().set_index('h3_cell')
 
 
 def from_raster(
@@ -266,14 +271,12 @@ def from_raster(
 
     return df 
 
-def h3_to_gdf(df,h3_column='h3_cell'):
+def h3_to_gdf(df, h3_column=None):
     df = df.copy()
+    if h3_column is not None:
+        df = df.set_index(h3_column)
+        
     # --- Validation ---
-    if h3_column not in df.columns:
-        raise ValueError(f"DataFrame must contain an '{h3_column}' column with H3 indices.")
-
-    df[h3_column] = df[h3_column].astype(str)
-
     # Detect proper validation function (for H3 v3/v4)
     if hasattr(h3, "is_valid_cell"):
         is_valid = h3.is_valid_cell
@@ -282,14 +285,14 @@ def h3_to_gdf(df,h3_column='h3_cell'):
     else:
         raise AttributeError("Cannot find a valid H3 validation function in the h3 module.")
 
-    df = df[df[h3_column].apply(is_valid)]
+    df = df[df.index.apply(is_valid)]
 
     # --- Build geometries ---
     def cell_to_polygon(cell):
         boundary = h3.cell_to_boundary(cell)
         return shapely.geometry.Polygon([(lng, lat) for lat, lng in boundary])
 
-    df["geometry"] = df[h3_column].apply(cell_to_polygon)
+    df["geometry"] = df.index.apply(cell_to_polygon)
     gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
     return gdf
 
