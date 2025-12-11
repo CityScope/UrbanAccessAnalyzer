@@ -275,7 +275,7 @@ def h3_to_gdf(df, h3_column=None):
     df = df.copy()
     if h3_column is not None:
         df = df.set_index(h3_column)
-        
+
     # --- Validation ---
     # Detect proper validation function (for H3 v3/v4)
     if hasattr(h3, "is_valid_cell"):
@@ -285,14 +285,14 @@ def h3_to_gdf(df, h3_column=None):
     else:
         raise AttributeError("Cannot find a valid H3 validation function in the h3 module.")
 
-    df = df[df.index.apply(is_valid)]
+    df = df[df.index.map(is_valid)]
 
     # --- Build geometries ---
     def cell_to_polygon(cell):
         boundary = h3.cell_to_boundary(cell)
         return shapely.geometry.Polygon([(lng, lat) for lat, lng in boundary])
 
-    df["geometry"] = df.index.apply(cell_to_polygon)
+    df["geometry"] = df.index.map(cell_to_polygon)
     gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
     return gdf
 
