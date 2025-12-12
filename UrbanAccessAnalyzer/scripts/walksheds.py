@@ -1,6 +1,3 @@
-import sys 
-sys.path.append('/home/miguel/Documents/Proyectos/PTLevelofService/accessibility/UrbanAccessAnalyzer')
-
 import os 
 import json
 import argparse
@@ -21,9 +18,9 @@ import UrbanAccessAnalyzer.poi_utils as poi_utils
 
 parser = argparse.ArgumentParser(description="Accesibility analysis.")
 
-parser.add_argument('--poi_file', type=str, required=True, help='Path to file containing points or polygons of interest')
+parser.add_argument('--poi_file', type=str, required=False, help='Path to file containing points or polygons of interest')
 parser.add_argument('--poi_quality_column', type=str, default=None, help='Column or columns in poi_file dataframe with info about poi quality. Pois are grouped based on this column.')
-parser.add_argument('--output_path', type=str, required=True, help='Path to save outputs.')
+parser.add_argument('--output_path', type=str, required=False, help='Path to save outputs.')
 parser.add_argument('--street_path', type=str, default=None, help='Path to download and search for street files.')
 parser.add_argument('--aoi', type=str, default=None, help='Area of interest')
 parser.add_argument('--min_edge_length', type=int, default=30, help='Edges less long than this are collapsed into one node.')
@@ -39,9 +36,27 @@ parser.add_argument(
     action='store_true',     # sets overwrite = True when used
     help='Overwrite all existing files. Default is False.'
 )
-
+parser.add_argument(
+    '--params_file',
+    type=str,
+    default=None,
+    help='Path to JSON file with all parameters (alternative to passing each argument individually)'
+)
 # Parse all arguments
 args = parser.parse_args()
+
+# If params_file is provided, load parameters from JSON
+if args.params_file is not None:
+    with open(args.params_file) as f:
+        params = json.load(f)
+    for key, value in params.items():
+        if hasattr(args, key):
+            setattr(args, key, value)
+
+if args.poi_file is None:
+    raise ValueError("Parameter 'poi_file' is required either via command line or params_file")
+if args.output_path is None:
+    raise ValueError("Parameter 'output_path' is required either via command line or params_file")
 
 poi_file = args.poi_file
 output_path = args.output_path
@@ -49,7 +64,25 @@ street_path = args.street_path
 if street_path is None:
     street_path = output_path
 
-poi_quality_column = args.poi_quality_column
+def ensure_list(value):
+    """Return a list: load from JSON string if needed, otherwise wrap single string in list."""
+    if isinstance(value, list):
+        return value
+    elif isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+            else:
+                return [value]  # raw string → wrap in list
+        except json.JSONDecodeError:
+            return [value]
+    else:
+        raise TypeError(f"Expected list or JSON string, got {type(value).__name__}")
+
+poi_quality_column = ensure_list(args.poi_quality_column)
+distance_steps = ensure_list(args.distance_steps)
+
 if poi_quality_column is not None:
     try:
         # Try JSON parsing (for cases like '["a","b"]')
@@ -70,8 +103,6 @@ if isinstance(poi_quality_column,str):
 
 min_edge_length = args.min_edge_length
 h3_resolution = args.h3_resolution
-
-distance_steps = json.loads(args.distance_steps)
 
 do_h3 = args.h3
 overwrite = args.overwrite
@@ -201,9 +232,20 @@ for quality_str in poi_points_gdf['_service_quality'].unique():
             level_of_service_edges.intersects(poi_selection.to_crs(level_of_service_edges.crs).union_all()),quality_str
         ] = min(distance_steps)
 
+    def _clean(series):
+        series = series.replace({"nan": None, "None": None})
+        # Convert np.nan/pd.NA to Python None
+        series = series.where(series.notna(), None)
+        return series.astype(object)
+
+    level_of_service_edges[quality_str] = _clean(level_of_service_edges[quality_str])
+    level_of_service_nodes[quality_str] = _clean(level_of_service_nodes[quality_str])
+
     level_of_service_graph = ox.graph_from_gdfs(level_of_service_nodes, level_of_service_edges)
     if quality_str in level_of_service_edges.columns:
         ls_columns.append(quality_str)
+
+    break
 
 level_of_service_nodes, level_of_service_edges = ox.graph_to_gdfs(level_of_service_graph)
 level_of_service_edges.reset_index().to_file(level_of_service_streets_path)
@@ -211,7 +253,7 @@ level_of_service_edges.reset_index().to_file(level_of_service_streets_path)
 if do_h3:
     aoi['id'] = 0
     ls_h3_df = h3_utils.from_gdf(aoi,value_column='id',value_order = [0], resolution=h3_resolution, method='first')
-    ls_h3_df.index = ls_h3_df.index.drop_duplicates()
+    ls_h3_df = ls_h3_df[~ls_h3_df.index.duplicated(keep='first')]
     ls_h3_df = ls_h3_df.drop(columns=ls_h3_df.columns)
 
     for column in ls_columns:

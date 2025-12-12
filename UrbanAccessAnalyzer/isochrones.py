@@ -516,6 +516,15 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
         iso_nodes_gdf, edges_gdf, priority_map, max_priority_map, priority_map_rev
     )
 
+    def _clean(series):
+        series = series.replace({"nan": None, "None": None})
+        # Convert np.nan/pd.NA to Python None
+        series = series.where(series.notna(), None)
+        return series.astype(object)
+
+    nodes_gdf["level_of_service"] = _clean(nodes_gdf["level_of_service"])
+    edges_gdf["level_of_service"] = _clean(edges_gdf["level_of_service"])
+
     H = ox.graph_from_gdfs(nodes_gdf, edges_gdf, graph_attrs=G.graph)
     return H
 
