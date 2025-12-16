@@ -47,10 +47,16 @@ args = parser.parse_args()
 
 # If params_file is provided, load parameters from JSON
 if args.params_file is not None:
+    args.overwrite = False 
+    args.h3 = False
     with open(args.params_file) as f:
         params = json.load(f)
     for key, value in params.items():
-        if hasattr(args, key):
+        if key == 'h3':
+            args.h3 = True
+        elif key == 'overwrite':
+            args.overwrite = True 
+        elif hasattr(args, key):
             setattr(args, key, value)
 
 if args.poi_file is None:
@@ -86,15 +92,8 @@ distance_steps = ensure_list(args.distance_steps)
 if poi_quality_column is not None:
     try:
         # Try JSON parsing (for cases like '["a","b"]')
-        parsed = json.loads(poi_quality_column)
-
-        # Only accept JSON lists. Otherwise treat as raw string
-        if isinstance(parsed, list):
-            poi_quality_column = parsed
-        else:
-            poi_quality_column = poi_quality_column   # keep original string
-
-    except json.JSONDecodeError:
+        parsed = ensure_list(poi_quality_column)
+    except:
         # Not JSON → keep it as a normal string
         poi_quality_column = poi_quality_column
 
