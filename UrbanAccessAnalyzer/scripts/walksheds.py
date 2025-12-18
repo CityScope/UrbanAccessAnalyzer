@@ -109,6 +109,9 @@ overwrite = args.overwrite
 # aoi 
 if args.aoi is None:
     poi = gpd.read_file(poi_file)
+    if len(poi) == 0:
+        raise ValueError(f"No pois in {poi_file}") 
+    
     poi = poi.to_crs(poi.estimate_utm_crs()) # Convert to utm
     aoi = gpd.GeoDataFrame(geometry=[poi.union_all().envelope],crs=poi.crs) # Ensure there is only one polygon
     aoi = aoi.to_crs(aoi.estimate_utm_crs()) # Convert to utm
@@ -124,6 +127,9 @@ else:
     info = pyogrio.read_info(poi_file) 
     poi_crs = info["crs"]
     poi = gpd.read_file(poi_file,bbox=tuple(aoi_download.to_crs(poi_crs).total_bounds))
+    if len(poi) == 0:
+        raise ValueError("No pois in aoi") 
+
     poi = poi.to_crs(poi.estimate_utm_crs()) # Convert to utm
 
 aoi_download = aoi_download.intersection(shapely.buffer(poi.union_all(),max(distance_steps)))
