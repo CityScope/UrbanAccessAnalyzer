@@ -32,7 +32,7 @@ def get_city_geometry(city_name: str) -> gpd.GeoDataFrame:
 
 def get_geographic_suggestions_from_string(
     query: str,
-    user_agent: str = "my-application",
+    user_agent: str = "UrbanAccessAnalyzer",
     max_results: int = 25
 ) -> Dict[str, List[str]]:
     """
