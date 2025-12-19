@@ -162,7 +162,7 @@ osm.geofabrik_to_osm(
 
 if overwrite or (not os.path.isfile(street_edges_path)):
     # Load
-    G = ox.graph_from_xml(osm_xml_file)
+    G = ox.graph_from_xml(osm_xml_file, retain_all=True, simplify=True)
     # Project geometry coordinates to UTM system to allow euclidean meassurements in meters (sorry americans)
     G = ox.project_graph(G,to_crs=aoi.estimate_utm_crs())
     # street_nodes, street_edges = ox.graph_to_gdfs(G)
