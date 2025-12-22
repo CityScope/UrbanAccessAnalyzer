@@ -193,7 +193,7 @@ else:
 G, osmids = graph_processing.add_points_to_graph(
     poi_points_gdf,
     G,
-    max_dist=100+min_edge_length, # Maximum distance from point to graph edge to project the point
+    max_dist=250+min_edge_length, # Maximum distance from point to graph edge to project the point
     min_edge_length=min_edge_length # Minimum edge length after adding the new nodes
 )
 poi_points_gdf['osmid'] = osmids # Add the ids of the nodes in the graph to points
@@ -202,7 +202,6 @@ poi_points_gdf = poi_points_gdf.dropna(subset=['osmid'])
 ls_columns = []
 level_of_service_graph = G.copy()
 for quality_str in poi_points_gdf['_service_quality'].unique():
-    warnings.warn(quality_str)
     poi_selection = poi_points_gdf[poi_points_gdf['_service_quality'] == quality_str]
     if len(poi_selection) == 0:
         continue
@@ -249,8 +248,6 @@ for quality_str in poi_points_gdf['_service_quality'].unique():
     level_of_service_graph = ox.graph_from_gdfs(level_of_service_nodes, level_of_service_edges)
     if quality_str in level_of_service_edges.columns:
         ls_columns.append(quality_str)
-
-    break
 
 level_of_service_nodes, level_of_service_edges = ox.graph_to_gdfs(level_of_service_graph)
 level_of_service_edges.reset_index().to_file(level_of_service_streets_path)
