@@ -224,7 +224,7 @@ if overwrite or (not os.path.isfile(accessibility_streets_path)):
     poi_points_gdf['osmid'] = osmids # Add the ids of the nodes in the graph to points
     poi_points_gdf = poi_points_gdf.dropna(subset=['osmid'])
 
-    ls_columns = []
+    accessibility_columns = []
     accessibility_graph = G.copy()
     for quality_str in poi_points_gdf['_service_quality'].unique():
         poi_selection = poi_points_gdf[poi_points_gdf['_service_quality'] == quality_str]
@@ -272,13 +272,17 @@ if overwrite or (not os.path.isfile(accessibility_streets_path)):
 
         accessibility_graph = ox.graph_from_gdfs(accessibility_nodes, accessibility_edges)
         if quality_str in accessibility_edges.columns:
-            ls_columns.append(quality_str)
+            accessibility_columns.append(quality_str)
 
     accessibility_nodes, accessibility_edges = ox.graph_to_gdfs(accessibility_graph)
     accessibility_edges.reset_index().to_file(accessibility_streets_path)
 else:
     accessibility_edges = gpd.read_file(accessibility_streets_path)
     accessibility_edges = accessibility_edges.set_index(["u", "v", "key"])
+    accessibility_columns = []
+    for quality_str in poi['_service_quality'].unique():
+        if quality_str in accessibility_edges.columns:
+            accessibility_columns.append(quality_str)
 
 if do_h3:
     if overwrite or (not os.path.isfile(h3_results_path)):
@@ -288,12 +292,13 @@ if do_h3:
         # ls_h3_df = ls_h3_df.drop(columns=ls_h3_df.columns)
         h3_frames = []
 
-        for column in ls_columns:
+        for column in accessibility_columns:
+            accessibility_edges[column] = accessibility_edges[column].astype(str).replace({"nan": None, "None": None})
             new_ls_h3_df = h3_utils.from_gdf(
                 accessibility_edges[[column, 'geometry']],
                 resolution=h3_resolution,
                 value_column=column,
-                value_order=distance_steps,
+                value_order=[str(i) for i in distance_steps],
                 buffer=10,
                 method='first'
             )[[column]]
