@@ -60,7 +60,8 @@ def default_distance_matrix(poi, distance_steps, service_quality_column="service
 
 def __distance_matrix_to_processing_order(distance_matrix, level_of_services):
     if isinstance(distance_matrix, list):
-        distances = distance_matrix
+        distances = [float(d) for d in distance_matrix]
+
         # Generate labels A, B, C... for each row
         if level_of_services is None:
             labels = list(string.ascii_uppercase[: len(distances)])
@@ -76,6 +77,8 @@ def __distance_matrix_to_processing_order(distance_matrix, level_of_services):
                 "ls": labels,
             }
         )
+        ls_process_order_df["distance"] = ls_process_order_df["distance"].astype(float)
+        
         ls_process_order_df = ls_process_order_df.sort_values(
             ["ls_id", "distance"], ascending=False
         )
@@ -92,6 +95,7 @@ def __distance_matrix_to_processing_order(distance_matrix, level_of_services):
     melted = distance_matrix.melt(
         id_vars="service_quality", var_name="distance", value_name="ls"
     )
+    melted["distance"] = melted["distance"].astype(float)
 
     # For each service_quality and value, find the max distance
     ls_process_order_df = (

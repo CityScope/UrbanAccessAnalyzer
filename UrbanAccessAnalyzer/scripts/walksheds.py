@@ -86,13 +86,14 @@ def ensure_list(value):
     else:
         raise TypeError(f"Expected list or JSON string, got {type(value).__name__}")
 
-poi_quality_column = ensure_list(args.poi_quality_column)
-distance_steps = ensure_list(args.distance_steps)
+distance_steps = [float(d) for d in ensure_list(args.distance_steps)]
+distance_steps = sorted(distance_steps)
 
+poi_quality_column = args.poi_quality_column
 if poi_quality_column is not None:
     try:
         # Try JSON parsing (for cases like '["a","b"]')
-        parsed = ensure_list(poi_quality_column)
+        poi_quality_column = ensure_list(poi_quality_column)
     except:
         # Not JSON → keep it as a normal string
         poi_quality_column = poi_quality_column
@@ -134,21 +135,45 @@ else:
 
 aoi_download = aoi_download.intersection(shapely.buffer(poi.union_all(),max(distance_steps)))
 
-poi['_service_quality'] = (
-    poi[poi_quality_column]              
-    .apply(lambda row: '_-_'.join(
-        f"{col}_{row[col]}"
-        for col in poi_quality_column
-    ), axis=1)
-)
+if poi_quality_column is not None:
+    if isinstance(poi_quality_column,list):
+        if len(poi_quality_column) > 1:
+            missing = set(poi_quality_column) - set(poi.columns)
+            if missing:
+                raise ValueError(f"Missing poi_quality_column(s): {missing}")
 
-osm_xml_file = os.path.normpath(output_path+f"/streets.osm")
-street_nodes_path = os.path.normpath(output_path+f"/street_nodes.gpkg")
-street_edges_path = os.path.normpath(output_path+f"/street_edges.gpkg")
-level_of_service_streets_path = os.path.normpath(output_path+f"/level_of_service_streets.gpkg")
-h3_results_path = os.path.normpath(output_path+f"/h3.csv")
+            poi['_service_quality'] = (
+                poi[poi_quality_column]              
+                .apply(lambda row: '_-_'.join(
+                    f"{col}_{row[col]}"
+                    for col in poi_quality_column
+                ), axis=1)
+            )
+        elif len(poi_quality_column) == 1:
+            missing = set(poi_quality_column) - set(poi.columns)
+            if missing:
+                raise ValueError(f"Missing poi_quality_column(s): {missing}")
 
-if overwrite or (not os.path.isfile(level_of_service_streets_path)):
+            poi['_service_quality'] = poi[poi_quality_column]    
+        else:
+            poi['_service_quality'] = 0
+    
+    else:
+        if poi_quality_column not in poi.columns:
+            raise ValueError(f"Missing poi_quality_column: {poi_quality_column}")
+
+        poi['_service_quality'] = poi[poi_quality_column]  
+    
+else:
+    poi['_service_quality'] = 0
+
+osm_xml_file = os.path.join(output_path,f"streets.osm")
+street_nodes_path = os.path.join(output_path,f"street_nodes.gpkg")
+street_edges_path = os.path.join(output_path,f"street_edges.gpkg")
+accessibility_streets_path = os.path.join(output_path,f"accessibility_streets.gpkg")
+h3_results_path = os.path.join(output_path,f"accessibility_h3.csv")
+
+if overwrite or (not os.path.isfile(accessibility_streets_path)):
     # Select what type of street network you want to load
     network_filter = osm.osmium_network_filter("walk+bike+primary")
     # Download the region pbf file crop it by aoi and convert to osm format
@@ -200,7 +225,7 @@ if overwrite or (not os.path.isfile(level_of_service_streets_path)):
     poi_points_gdf = poi_points_gdf.dropna(subset=['osmid'])
 
     ls_columns = []
-    level_of_service_graph = G.copy()
+    accessibility_graph = G.copy()
     for quality_str in poi_points_gdf['_service_quality'].unique():
         poi_selection = poi_points_gdf[poi_points_gdf['_service_quality'] == quality_str]
         if len(poi_selection) == 0:
@@ -209,31 +234,31 @@ if overwrite or (not os.path.isfile(level_of_service_streets_path)):
         distance_matrix = {
             "service_quality": [quality_str],
         }
-        level_of_services = []
+        accessibility_values = []
         for d in distance_steps:
-            distance_matrix[d] = [str(d)]
-            level_of_services.append(str(d))
+            distance_matrix[str(d)] = [str(d)]
+            accessibility_values.append(str(d))
 
         distance_matrix = pd.DataFrame(distance_matrix)
-        level_of_service_graph = isochrones.graph(
-            G=level_of_service_graph,
+        accessibility_graph = isochrones.graph(
+            G=accessibility_graph,
             points=poi_points_gdf,
             distance_matrix=distance_matrix,
             service_quality_col = '_service_quality', # If all points have the same quality this could be None
-            level_of_services = level_of_services, # could be None and it will set to the sorted unique values of the matrix
+            level_of_services = accessibility_values, # could be None and it will set to the sorted unique values of the matrix
             min_edge_length = min_edge_length, # Do not add new nodes if there will be an edge with less than this length
             verbose=False
         )
         # Save edges as gpkg
-        level_of_service_nodes, level_of_service_edges = ox.graph_to_gdfs(level_of_service_graph)
-        level_of_service_nodes = level_of_service_nodes.rename(columns={'level_of_service':quality_str})
-        level_of_service_edges = level_of_service_edges.rename(columns={'level_of_service':quality_str})
+        accessibility_nodes, accessibility_edges = ox.graph_to_gdfs(accessibility_graph)
+        accessibility_nodes = accessibility_nodes.rename(columns={'accessibility':quality_str})
+        accessibility_edges = accessibility_edges.rename(columns={'accessibility':quality_str})
         if is_point == False:
-            level_of_service_nodes.loc[
-                level_of_service_nodes.intersects(poi_selection.to_crs(level_of_service_nodes.crs).union_all()),quality_str
+            accessibility_nodes.loc[
+                accessibility_nodes.intersects(poi_selection.to_crs(accessibility_nodes.crs).union_all()),quality_str
             ] = min(distance_steps)
-            level_of_service_edges.loc[
-                level_of_service_edges.intersects(poi_selection.to_crs(level_of_service_edges.crs).union_all()),quality_str
+            accessibility_edges.loc[
+                accessibility_edges.intersects(poi_selection.to_crs(accessibility_edges.crs).union_all()),quality_str
             ] = min(distance_steps)
 
         def _clean(series):
@@ -242,18 +267,18 @@ if overwrite or (not os.path.isfile(level_of_service_streets_path)):
             series = series.where(series.notna(), None)
             return series.astype(object)
 
-        level_of_service_edges[quality_str] = _clean(level_of_service_edges[quality_str])
-        level_of_service_nodes[quality_str] = _clean(level_of_service_nodes[quality_str])
+        accessibility_edges[quality_str] = _clean(accessibility_edges[quality_str])
+        accessibility_nodes[quality_str] = _clean(accessibility_nodes[quality_str])
 
-        level_of_service_graph = ox.graph_from_gdfs(level_of_service_nodes, level_of_service_edges)
-        if quality_str in level_of_service_edges.columns:
+        accessibility_graph = ox.graph_from_gdfs(accessibility_nodes, accessibility_edges)
+        if quality_str in accessibility_edges.columns:
             ls_columns.append(quality_str)
 
-    level_of_service_nodes, level_of_service_edges = ox.graph_to_gdfs(level_of_service_graph)
-    level_of_service_edges.reset_index().to_file(level_of_service_streets_path)
+    accessibility_nodes, accessibility_edges = ox.graph_to_gdfs(accessibility_graph)
+    accessibility_edges.reset_index().to_file(accessibility_streets_path)
 else:
-    level_of_service_edges = gpd.read_file(level_of_service_streets_path)
-    level_of_service_edges = level_of_service_edges.set_index(["u", "v", "key"])
+    accessibility_edges = gpd.read_file(accessibility_streets_path)
+    accessibility_edges = accessibility_edges.set_index(["u", "v", "key"])
 
 if do_h3:
     if overwrite or (not os.path.isfile(h3_results_path)):
@@ -265,7 +290,7 @@ if do_h3:
 
         for column in ls_columns:
             new_ls_h3_df = h3_utils.from_gdf(
-                level_of_service_edges[[column, 'geometry']],
+                accessibility_edges[[column, 'geometry']],
                 resolution=h3_resolution,
                 value_column=column,
                 value_order=distance_steps,
