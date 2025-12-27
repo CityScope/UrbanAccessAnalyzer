@@ -14,7 +14,7 @@ import warnings
 TODO: There is still a bug in the LoS graph and sometimes the values seem 
 to not reach long enaough maybe. 
 Or maybe it is right and the distance_matrix is the reason. This happened with the green areas.
-TODO: Add source node_id to the level_of_service info. 
+TODO: Add source node_id to the accessibility info. 
 """
 
 def default_distance_matrix(poi, distance_steps, service_quality_column="service_quality"):
@@ -33,7 +33,7 @@ def default_distance_matrix(poi, distance_steps, service_quality_column="service
     df : pandas.DataFrame
         DataFrame with service_quality as rows, distance_steps as columns,
         and letters ('A','B','C',...) forming a diagonal pattern.
-    level_of_services : list
+    accessibility_values : list
         Sorted list of unique letters used in the DataFrame.
     """
     service_quality = np.unique(poi[service_quality_column].dropna())
@@ -50,23 +50,23 @@ def default_distance_matrix(poi, distance_steps, service_quality_column="service
             df.at[sq, dist] = letters[idx]
 
     # Extract unique letters used, sorted in order
-    level_of_services = sorted(df.stack().unique(), key=lambda x: letters.index(x))
+    accessibility_values = sorted(df.stack().unique(), key=lambda x: letters.index(x))
 
     df[service_quality_column] = df.index 
     df = df.reset_index(drop=True)
 
-    return df, level_of_services
+    return df, accessibility_values
 
 
-def __distance_matrix_to_processing_order(distance_matrix, level_of_services):
+def __distance_matrix_to_processing_order(distance_matrix, accessibility_values):
     if isinstance(distance_matrix, list):
         distances = [float(d) for d in distance_matrix]
 
         # Generate labels A, B, C... for each row
-        if level_of_services is None:
+        if accessibility_values is None:
             labels = list(string.ascii_uppercase[: len(distances)])
         else:
-            labels = list(level_of_services)
+            labels = list(accessibility_values)
 
         # Build DataFrame
         ls_process_order_df = pd.DataFrame(
@@ -87,9 +87,9 @@ def __distance_matrix_to_processing_order(distance_matrix, level_of_services):
     if "service_quality" not in distance_matrix:
         raise Exception("Column service_quality should always exist in distance_matrix")
 
-    if level_of_services is None:
-        level_of_services = distance_matrix.drop(columns=["service_quality"]).to_numpy()
-        level_of_services = list(np.unique(level_of_services))
+    if accessibility_values is None:
+        accessibility_values = distance_matrix.drop(columns=["service_quality"]).to_numpy()
+        accessibility_values = list(np.unique(accessibility_values))
 
     # Melt the dataframe to long format for easier processing
     melted = distance_matrix.melt(
@@ -102,7 +102,7 @@ def __distance_matrix_to_processing_order(distance_matrix, level_of_services):
         melted.groupby(["service_quality", "ls"])["distance"].max().reset_index()
     )
     ls_process_order_df["ls_id"] = ls_process_order_df["ls"].replace(
-        {level_of_services[i]: str(i) for i in range(len(level_of_services))}
+        {accessibility_values[i]: str(i) for i in range(len(accessibility_values))}
     )
     ls_process_order_df["ls_id"] = ls_process_order_df["ls_id"].astype(int)
     ls_process_order_df = (
@@ -122,7 +122,7 @@ def __compute_isochrones(G, points, ls_process_order_df, service_quality_col=Non
         points["__service_quality"] = 1
         service_quality_col = "__service_quality"
 
-    for quality, distance, level_of_service in tqdm(
+    for quality, distance, accessibility in tqdm(
         ls_process_order_df[["service_quality", "distance", "ls"]].itertuples(
             index=False, name=None
         ),
@@ -146,7 +146,7 @@ def __compute_isochrones(G, points, ls_process_order_df, service_quality_col=Non
                 undirected=True,
             )
             existing_dist = nx.get_node_attributes(
-                H, f"remaining_dist_{level_of_service}"
+                H, f"remaining_dist_{accessibility}"
             )
             if len(existing_dist) > 0:
                 existing_dist = np.array(
@@ -173,22 +173,22 @@ def __compute_isochrones(G, points, ls_process_order_df, service_quality_col=Non
                 remaining_dist = dict(remaining_dist.tolist())
 
             nx.set_node_attributes(
-                H, remaining_dist, f"remaining_dist_{level_of_service}"
+                H, remaining_dist, f"remaining_dist_{accessibility}"
             )
             nx.set_node_attributes(
                 H,
-                dict(zip(remaining_dist.keys(), repeat(level_of_service))),
-                "level_of_service",
+                dict(zip(remaining_dist.keys(), repeat(accessibility))),
+                "accessibility",
             )
 
     return H
 
 
-def __set_edge_level_of_service(
+def __set_edge_accessibility(
     nodes_gdf, edges_gdf, priority_map, max_priority_map, priority_map_rev
 ):
     """
-    Normalize, combine, and restore level_of_service values on nodes and edges.
+    Normalize, combine, and restore accessibility values on nodes and edges.
     Ensures no 'nan', 'None' or np.nan leaks into the final output.
     """
 
@@ -211,70 +211,70 @@ def __set_edge_level_of_service(
     nodes_gdf = nodes_gdf.reset_index().copy()
 
     # ---- Normalize edge LOS if column exists ----
-    if "level_of_service" in edges_gdf.columns:
-        edges_gdf["level_of_service"] = (
-            edges_gdf["level_of_service"]
+    if "accessibility" in edges_gdf.columns:
+        edges_gdf["accessibility"] = (
+            edges_gdf["accessibility"]
             .astype(str)
             .replace(priority_map)
         )
 
-        edges_gdf["level_of_service"] = edges_gdf["level_of_service"].fillna(
+        edges_gdf["accessibility"] = edges_gdf["accessibility"].fillna(
             str(max_priority_map + 1)
         )
 
-        edges_gdf["level_of_service"] = edges_gdf["level_of_service"].astype(int)
+        edges_gdf["accessibility"] = edges_gdf["accessibility"].astype(int)
 
     else:
-        edges_gdf["level_of_service"] = max_priority_map + 1
+        edges_gdf["accessibility"] = max_priority_map + 1
 
     # ---- Normalize node LOS ----
-    nodes_gdf["level_of_service"] = (
-        nodes_gdf["level_of_service"]
+    nodes_gdf["accessibility"] = (
+        nodes_gdf["accessibility"]
         .astype(str)
         .replace(priority_map)
     )
 
-    nodes_gdf["level_of_service"] = nodes_gdf["level_of_service"].fillna(
+    nodes_gdf["accessibility"] = nodes_gdf["accessibility"].fillna(
         str(max_priority_map + 1)
     )
 
-    nodes_gdf["level_of_service"] = nodes_gdf["level_of_service"].astype(int)
+    nodes_gdf["accessibility"] = nodes_gdf["accessibility"].astype(int)
 
     # ---- Merge node LOS into edges ----
     edges_gdf = edges_gdf.reset_index()
 
     edges_gdf = edges_gdf.merge(
-        nodes_gdf[["osmid", "level_of_service"]]
-        .rename(columns={"osmid": "u", "level_of_service": "level_of_service_u"}),
+        nodes_gdf[["osmid", "accessibility"]]
+        .rename(columns={"osmid": "u", "accessibility": "accessibility_u"}),
         on="u",
         how="left",
     )
 
     edges_gdf = edges_gdf.merge(
-        nodes_gdf[["osmid", "level_of_service"]]
-        .rename(columns={"osmid": "v", "level_of_service": "level_of_service_v"}),
+        nodes_gdf[["osmid", "accessibility"]]
+        .rename(columns={"osmid": "v", "accessibility": "accessibility_v"}),
         on="v",
         how="left",
     )
 
     # ---- Compute edge LOS as minimum ----
-    edges_gdf["level_of_service"] = (
-        edges_gdf[["level_of_service_u", "level_of_service_v", "level_of_service"]]
+    edges_gdf["accessibility"] = (
+        edges_gdf[["accessibility_u", "accessibility_v", "accessibility"]]
         .min(axis=1)
         .astype(int)
     )
 
-    edges_gdf = edges_gdf.drop(columns=["level_of_service_u", "level_of_service_v"])
+    edges_gdf = edges_gdf.drop(columns=["accessibility_u", "accessibility_v"])
 
     # ---- Map integer priorities back to original values ----
-    edges_gdf["level_of_service"] = (
-        edges_gdf["level_of_service"]
+    edges_gdf["accessibility"] = (
+        edges_gdf["accessibility"]
         .astype(str)
         .replace(priority_map_rev)
     )
 
-    nodes_gdf["level_of_service"] = (
-        nodes_gdf["level_of_service"]
+    nodes_gdf["accessibility"] = (
+        nodes_gdf["accessibility"]
         .astype(str)
         .replace(priority_map_rev)
     )
@@ -287,8 +287,8 @@ def __set_edge_level_of_service(
         series = series.where(series.notna(), None)
         return series.astype(object)
 
-    edges_gdf["level_of_service"] = _clean(edges_gdf["level_of_service"])
-    nodes_gdf["level_of_service"] = _clean(nodes_gdf["level_of_service"])
+    edges_gdf["accessibility"] = _clean(edges_gdf["accessibility"])
+    nodes_gdf["accessibility"] = _clean(nodes_gdf["accessibility"])
 
     # ---- Restore indices ----
     edges_gdf = edges_gdf.set_index(["u", "v", "key"])
@@ -298,22 +298,22 @@ def __set_edge_level_of_service(
 
 
 def __exact_isochrones(G, ls_process_order_df, min_edge_length):
-    level_of_services = list(ls_process_order_df["ls"].drop_duplicates())
-    level_of_services.reverse()
+    accessibility_values = list(ls_process_order_df["ls"].drop_duplicates())
+    accessibility_values.reverse()
 
     nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
     remaining_dist_cols = [
         c for c in nodes_gdf.columns
         if (c.startswith("remaining_dist_")
-            and (c.removeprefix("remaining_dist_") in level_of_services))
+            and (c.removeprefix("remaining_dist_") in accessibility_values))
     ]
 
-    level_of_services = [
-        ls for ls in level_of_services if f"remaining_dist_{ls}" in remaining_dist_cols
+    accessibility_values = [
+        ls for ls in accessibility_values if f"remaining_dist_{ls}" in remaining_dist_cols
     ]
 
 
-    if len(level_of_services) == 0:
+    if len(accessibility_values) == 0:
         warnings.warn(
             "No nodes have attribute remaining_dist. Probably no isochrones have been generated.",
             UserWarning
@@ -343,34 +343,34 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
     )
     edges_gdf = edges_gdf.drop(columns=["osmid_v"]).rename(columns={"osmid_u": "osmid"})
 
-    nodes_gdf["level_of_service"] = None
-    for i in range(len(level_of_services)):
-        ls = level_of_services[len(level_of_services) - 1 - i]
+    nodes_gdf["accessibility"] = None
+    for i in range(len(accessibility_values)):
+        ls = accessibility_values[len(accessibility_values) - 1 - i]
         col = f"remaining_dist_{ls}"
-        nodes_gdf.loc[nodes_gdf[col] > min_edge_length, "level_of_service"] = ls
+        nodes_gdf.loc[nodes_gdf[col] > min_edge_length, "accessibility"] = ls
 
     nodes_gdf = nodes_gdf.drop(columns=remaining_dist_cols)
 
-    max_priority_map = len(level_of_services)
-    priority_map = {val: str(i) for i, val in enumerate(level_of_services)}
-    priority_map_rev = {str(i): val for i, val in enumerate(level_of_services)}
+    max_priority_map = len(accessibility_values)
+    priority_map = {val: str(i) for i, val in enumerate(accessibility_values)}
+    priority_map_rev = {str(i): val for i, val in enumerate(accessibility_values)}
     priority_map_rev[str(max_priority_map + 1)] = None
 
-    edges_gdf[f"last_level_of_service_{level_of_services[-1]}_u"] = None
-    edges_gdf[f"last_level_of_service_{level_of_services[-1]}_v"] = None
+    edges_gdf[f"last_accessibility_{accessibility_values[-1]}_u"] = None
+    edges_gdf[f"last_accessibility_{accessibility_values[-1]}_v"] = None
 
-    for i in range(len(level_of_services)):
-        ls = level_of_services[len(level_of_services) - 1 - i]
-        remaining_ls = level_of_services[0 : (len(level_of_services) - i - 1)]
-        # remaining_ls = [ls for ls in level_of_services[0:(len(level_of_services)-i-1)]
+    for i in range(len(accessibility_values)):
+        ls = accessibility_values[len(accessibility_values) - 1 - i]
+        remaining_ls = accessibility_values[0 : (len(accessibility_values) - i - 1)]
+        # remaining_ls = [ls for ls in accessibility_values[0:(len(accessibility_values)-i-1)]
         #                 if ls in remaining_dist_cols]
         col = f"remaining_dist_{ls}"
         edges_gdf.loc[
             (edges_gdf[col + "_u"] + edges_gdf[col + "_v"])
             > (edges_gdf["length"] - min_edge_length),
-            "level_of_service",
+            "accessibility",
         ] = ls
-        if i < (len(level_of_services) - 1):
+        if i < (len(accessibility_values) - 1):
             mask_u = (
                 edges_gdf[[f"remaining_dist_{j}_u" for j in remaining_ls]].max(axis=1)
                 < edges_gdf[col + "_u"]
@@ -381,16 +381,16 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
             )
             edges_gdf.loc[
                 mask_u & (edges_gdf[col + "_u"] > min_edge_length),
-                [f"last_level_of_service_{j}_u" for j in remaining_ls],
+                [f"last_accessibility_{j}_u" for j in remaining_ls],
             ] = ls
             edges_gdf.loc[
                 mask_v & (edges_gdf[col + "_v"] > min_edge_length),
-                [f"last_level_of_service_{j}_v" for j in remaining_ls],
+                [f"last_accessibility_{j}_v" for j in remaining_ls],
             ] = ls
 
     dist_u = np.zeros(len(edges_gdf))
     dist_v = np.zeros(len(edges_gdf))
-    for ls in level_of_services:
+    for ls in accessibility_values:
         col = f"remaining_dist_{ls}"
         new_dist_u = np.maximum(edges_gdf[col + "_u"].to_numpy(), dist_u)
         new_dist_v = np.maximum(edges_gdf[col + "_v"].to_numpy(), dist_v)
@@ -448,7 +448,7 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
     edges_gdf = edges_gdf.drop(columns=remaining_dist_cols_u_v)
     edges_gdf = edges_gdf.drop(
         columns=[
-            col.replace("remaining_dist_", "last_level_of_service_")
+            col.replace("remaining_dist_", "last_accessibility_")
             for col in remaining_dist_cols_u_v
         ]
     )
@@ -462,22 +462,22 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
     ]
     # Get corresponding row and column names
     rows = edges_border_gdf[rest_of_cols].iloc[row_idx].reset_index(drop=True)
-    level_of_services_u_v = [
+    accessibility_values_u_v = [
         c.removeprefix("remaining_dist_") for c in remaining_dist_cols_u_v
     ]
-    sources = np.array(level_of_services_u_v)[col_idx]
+    sources = np.array(accessibility_values_u_v)[col_idx]
 
     projected_dist = values[row_idx, col_idx]
 
     edges_border_gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs=edges_gdf.crs)
     if len(edges_border_gdf) > 0:
-        edges_border_gdf["level_of_service"] = sources
-        edges_border_gdf["level_of_service"] = edges_border_gdf.apply( 
-            lambda row: row[f'last_level_of_service_{row["level_of_service"]}'], axis=1
+        edges_border_gdf["accessibility"] = sources
+        edges_border_gdf["accessibility"] = edges_border_gdf.apply( 
+            lambda row: row[f'last_accessibility_{row["accessibility"]}'], axis=1
         )
         edges_border_gdf = edges_border_gdf.drop(
             columns=[
-                col.replace("remaining_dist_", "last_level_of_service_")
+                col.replace("remaining_dist_", "last_accessibility_")
                 for col in remaining_dist_cols_u_v
             ]
         )
@@ -508,15 +508,15 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
             nodes_gdf, edges_gdf, edges_border_gdf
         )
 
-    edges_gdf, nodes_gdf = __set_edge_level_of_service(
+    edges_gdf, nodes_gdf = __set_edge_accessibility(
         nodes_gdf,
-        edges_gdf.drop(columns="level_of_service"),
+        edges_gdf.drop(columns="accessibility"),
         priority_map,
         max_priority_map,
         priority_map_rev,
     )
     iso_nodes_gdf = nodes_gdf.loc[orig_node_ids]
-    edges_gdf, _ = __set_edge_level_of_service(
+    edges_gdf, _ = __set_edge_accessibility(
         iso_nodes_gdf, edges_gdf, priority_map, max_priority_map, priority_map_rev
     )
 
@@ -526,8 +526,8 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
         series = series.where(series.notna(), None)
         return series.astype(object)
 
-    nodes_gdf["level_of_service"] = _clean(nodes_gdf["level_of_service"])
-    edges_gdf["level_of_service"] = _clean(edges_gdf["level_of_service"])
+    nodes_gdf["accessibility"] = _clean(nodes_gdf["accessibility"])
+    edges_gdf["accessibility"] = _clean(edges_gdf["accessibility"])
 
     H = ox.graph_from_gdfs(nodes_gdf, edges_gdf, graph_attrs=G.graph)
     return H
@@ -538,7 +538,7 @@ def graph(
     points,
     distance_matrix,
     service_quality_col=None,
-    level_of_services=None,
+    accessibility_values=None,
     min_edge_length=0,
     max_dist=None,
     verbose:bool=True
@@ -565,7 +565,7 @@ def graph(
         return G
 
     ls_process_order_df = __distance_matrix_to_processing_order(
-        distance_matrix=distance_matrix, level_of_services=level_of_services
+        distance_matrix=distance_matrix, accessibility_values=accessibility_values
     )
     H = __compute_isochrones(
         H,
@@ -586,7 +586,7 @@ def graph(
 
 
 def buffers(
-    service_geoms, distance_matrix, level_of_services, service_quality_col, verbose:bool=True
+    service_geoms, distance_matrix, accessibility_values, service_quality_col, verbose:bool=True
 ):
     if service_geoms.crs.is_geographic:
         service_geoms = service_geoms.to_crs(service_geoms.estimate_utm_crs())
@@ -596,15 +596,15 @@ def buffers(
         service_quality_col = "__service_quality"
 
     ls_process_order_df = __distance_matrix_to_processing_order(
-        distance_matrix=distance_matrix, level_of_services=level_of_services
+        distance_matrix=distance_matrix, accessibility_values=accessibility_values
     )
 
-    level_of_services_list = list(ls_process_order_df["ls"].drop_duplicates())
-    level_of_services_list.reverse()
+    accessibility_values_list = list(ls_process_order_df["ls"].drop_duplicates())
+    accessibility_values_list.reverse()
     buffers = {
-        ls:[] for ls in level_of_services_list
+        ls:[] for ls in accessibility_values_list
     }
-    for quality, distance, level_of_service in tqdm(
+    for quality, distance, accessibility in tqdm(
         ls_process_order_df[["service_quality", "distance", "ls"]].itertuples(
             index=False, name=None
         ),
@@ -616,14 +616,14 @@ def buffers(
 
         selected_points = service_geoms[service_geoms[service_quality_col].isin(quality)]
         selected_points = selected_points.geometry.union_all().buffer(distance,resolution=4)
-        buffers[level_of_service].append(selected_points)
+        buffers[accessibility].append(selected_points)
 
     rows = []
     total_geometry = None
     i=0
-    for level_of_service in level_of_services_list:
+    for accessibility in accessibility_values_list:
         i+=1
-        geom = shapely.unary_union(buffers[level_of_service])
+        geom = shapely.unary_union(buffers[accessibility])
         if total_geometry is None:
             total_geometry = geom
             row_geom = geom
@@ -631,9 +631,9 @@ def buffers(
             row_geom = shapely.difference(geom,total_geometry)
             total_geometry = shapely.unary_union([total_geometry,geom])
 
-        rows.append({'level_of_service': level_of_service, 'level_of_service_int': i, 'geometry': row_geom})
+        rows.append({'accessibility': accessibility, 'accessibility_int': i, 'geometry': row_geom})
 
 
     result = gpd.GeoDataFrame(rows, crs=service_geoms.crs)
-    return result.sort_values("level_of_service_int")
+    return result.sort_values("accessibility_int")
 

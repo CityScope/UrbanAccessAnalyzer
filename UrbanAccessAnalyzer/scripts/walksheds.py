@@ -245,7 +245,7 @@ if overwrite or (not os.path.isfile(accessibility_streets_path)):
             points=poi_points_gdf,
             distance_matrix=distance_matrix,
             service_quality_col = '_service_quality', # If all points have the same quality this could be None
-            level_of_services = accessibility_values, # could be None and it will set to the sorted unique values of the matrix
+            accessibility_values = accessibility_values, # could be None and it will set to the sorted unique values of the matrix
             min_edge_length = min_edge_length, # Do not add new nodes if there will be an edge with less than this length
             verbose=False
         )
