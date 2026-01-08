@@ -263,10 +263,12 @@ if overwrite or (not os.path.isfile(accessibility_streets_path)):
             ] = min(distance_steps)
 
         def _clean(series):
-            series = series.replace({"nan": None, "None": None, np.nan: None, pd.NA: None})
-            # Convert np.nan/pd.NA to Python None
-            series = series.where(series.notna(), None)
-            return series.astype(object)
+            # Replace string "nan"/"None" with np.nan first
+            series = series.replace({"nan": np.nan, "None": np.nan})
+            # Convert to float, invalid parsing becomes np.nan
+            series = pd.to_numeric(series, errors='coerce')
+            # Optional: convert np.nan to None if you really want Python None
+            return series.where(series.notna(), None)
 
         if quality_str in accessibility_edges.columns:
             accessibility_edges[quality_str] = _clean(accessibility_edges[quality_str])
@@ -293,9 +295,8 @@ if do_h3:
         h3_df = h3_utils.from_gdf(
             accessibility_edges,
             resolution=h3_resolution,
-            value_order=accessibility_values,
             buffer=10,
             contain="overlap",
-            method="first"
+            method="min"
         )
         h3_df.reset_index().to_csv(h3_results_path)
