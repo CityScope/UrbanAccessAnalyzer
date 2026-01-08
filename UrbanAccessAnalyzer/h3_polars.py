@@ -2,8 +2,9 @@ import warnings
 from typing import Dict, List, Literal, Optional, Union
 
 import numpy as np
-import pandas as pd
+import polars as pl
 import geopandas as gpd
+import pandas as pd
 import h3
 
 from shapely.geometry import Polygon
@@ -38,9 +39,8 @@ GEOMETRY_COLLECTION_TYPE: str = "GeometryCollection"
 # ------------------------------------------------------------------------------
 
 def cells_in_geometry(
-    gdf: Union[gpd.GeoDataFrame, gpd.GeoSeries],
+    gdf: Union[pl.DataFrame, pl.LazyFrame],
     resolution: int,
-    buffer: float = 0.0,
     contain: Literal[
         "center",
         "full",
@@ -49,7 +49,7 @@ def cells_in_geometry(
         "centroid",
         "center_overlap",
     ] = "center_overlap",
-) -> gpd.GeoDataFrame:
+) -> pl.LazyFrame:
     """
     Rasterize vector geometries into H3 hexagonal cells.
 
@@ -96,12 +96,6 @@ def cells_in_geometry(
     --------
     Relies on H3 experimental APIs which may change behavior.
     """
-
-    # Normalize input to GeoDataFrame
-    if isinstance(gdf, gpd.GeoSeries):
-        gdf = gpd.GeoDataFrame({}, geometry=gdf, crs=gdf.crs)
-    else:
-        gdf = gdf.copy()
 
     # Handle CRS for buffering vs. non-buffering cases
     if buffer > 0:
@@ -223,13 +217,14 @@ def cells_in_geometry(
 # Explode & aggregate
 # ------------------------------------------------------------------------------
 
+
 def aggregate(
-    h3_df: gpd.GeoDataFrame | pd.DataFrame,
+    h3_df: pl.DataFrame | pl.LazyFrame,
     columns: List[str] = [],
     value_order: Union[List, Dict[str, List]] = {},
     method: Union[str, Dict[str, str]] = "max",
-    h3_column: Optional[str] = None
-) -> pd.DataFrame:
+    h3_column: Optional[str] = 'h3_cell'
+) -> pl.LazyFrame:
     """
     Explode H3 cell lists and aggregate values per cell.
 
@@ -255,19 +250,10 @@ def aggregate(
     pandas.DataFrame
         DataFrame indexed by ``h3_cell`` with aggregated values.
     """
-
-    h3_df = h3_df.copy()
-
     if h3_column is None:
-        if h3_df.index.name == "h3_cells":
-            h3_df = h3_df.reset_index()
-            h3_column = "h3_cells"
-        elif h3_df.index.name == "h3_cell":
-            h3_df = h3_df.reset_index()
-            h3_column = "h3_cell"  
-        elif "h3_cells" in h3_df.columns:
+        if "h3_cells" in h3_df.collect_schema().names():
             h3_column = "h3_cells" 
-        elif "h3_cell" in h3_df.columns:
+        elif "h3_cell" in h3_df.collect_schema().names():
             h3_column = "h3_cell" 
         else:
             raise Exception("Param h3_column is needed as h3 cell column could not be infered.")
@@ -275,12 +261,18 @@ def aggregate(
     if h3_column != "h3_cell": 
         if "h3_cell" in h3_df.columns:
             warnings.warn(f"h3_cell column exists in h3_df. Dropping h3_cell column and renaming {h3_column} to h3_cell.")
-            h3_df = h3_df.drop(columns="h3_cell")
+            h3_df = h3_df.drop("h3_cell")
 
-        h3_df = h3_df.rename(columns={h3_column: "h3_cell"}) 
+        h3_df = h3_df.rename({h3_column: "h3_cell"}) 
 
-    # Normalize missing values
-    h3_df = h3_df.replace(["nan", "None", np.nan], None)
+    # Replace "nan" and "None" strings with None
+    h3_df = h3_df.with_columns([
+        pl.when((pl.col(c) == "nan") | (pl.col(c) == "None"))
+        .then(None)
+        .otherwise(pl.col(c))
+        .alias(c)
+        for c in h3_df.collect_schema().names()
+    ])
 
     # Determine aggregation columns
     if (columns is None) or (len(columns) == 0):
@@ -289,14 +281,18 @@ def aggregate(
             if c != "h3_cell" and not isinstance(h3_df[c], gpd.GeoSeries)
         ]
 
-    # Fallback when no columns are provided
-    if len(columns) == 0:
-        h3_df["idx"] = h3_df.index
-        columns = ["idx"]
 
-    h3_df = h3_df.dropna(
-        how="all",
-        subset=columns,
+    # Fallback when no columns are provided
+    delete_columns = []
+    if len(columns) == 0:
+        h3_df = h3_df.with_columns(
+            pl.lit(0).alias("column")
+        )
+        columns = ["column"]
+        delete_columns.append("column")
+
+    h3_df = h3_df.filter(
+        ~pl.all(columns).is_null()
     )
 
     # Normalize value_order into dict form
@@ -335,20 +331,31 @@ def aggregate(
             else:
                 # Mixed types or other -> fallback to object
                 common_type = object
+            
 
             # Cast the column, keeping None safe
             if common_type in (int, float, str):
-                mask = h3_df[col].notna()  # True for all non-null values
-                h3_df.loc[mask, col] = h3_df.loc[mask, col].astype(common_type)
-            else:
-                h3_df[col] = h3_df[col].astype(object)
-                
+                h3_df = h3_df.with_columns(
+                    pl.col(col).cast(common_type)
+                )
+
             mapping = {
                 v if v is None else common_type(v): i
                 for i, v in enumerate(value_order[col])
             }
-            h3_df[f"_{col}_int"] = h3_df[col].map(mapping).where(
-                h3_df[col].isin(value_order[col]), len(value_order[col])
+            # Use pl.when().then() chain
+            expr = None
+            for v, i in mapping.items():
+                if expr is None:
+                    expr = pl.when(pl.col(col) == v).then(i)
+                else:
+                    expr = expr.when(pl.col(column) == v).then(i)
+
+            # Handle nulls / unmapped values
+            expr = expr.otherwise(pl.lit(None))
+        
+            h3_df = h3_df.with_columns(
+                expr.alias(f"_{col}_int")
             )
             mapped_cols[col] = f"_{col}_int"
             all_columns.append(f"_{col}_int")
@@ -363,8 +370,8 @@ def aggregate(
         if col not in method:
             raise Exception(f"Value missing for column {col} in param method {method}")
 
-    agg_dict: Dict[str, str] = {}
-    col_totals: Dict[str, str] = {}
+    agg_dict = {}
+    col_totals = {}
 
     # Build aggregation instructions
     for col, m in method.items():
@@ -372,85 +379,110 @@ def aggregate(
             col = mapped_cols[col]
 
         if m == "first":
-            agg_dict[col] = "first"
+            agg_dict[col] = pl.first()
         elif m == "last":
-            agg_dict[col] = "last"
+            agg_dict[col] = pl.last()
         elif m == "max":
-            agg_dict[col] = "max"
+            agg_dict[col] = pl.max()
         elif m == "min":
-            agg_dict[col] = "min"
+            agg_dict[col] = pl.min()
         elif m == "mean":
-            h3_df[col] = h3_df[col].astype(float)
-            agg_dict[col] = "mean"
+            h3_df = h3_df.with_columns(
+                pl.col(col).cast(float)
+            )
+            agg_dict[col] = pl.mean()
         elif m == "sum":
-            s = pd.to_numeric(h3_df[col], errors="coerce")
-            if (s.dropna() % 1 == 0).all():
-                h3_df[col] = s.astype(int)
-            else:
-                h3_df[col] = s.astype(float)
-            agg_dict[col] = "sum"
+            h3_df = h3_df.with_columns(
+                pl.col(col).cast(float)
+            )
+            agg_dict[col] = pl.sum()
         elif m == "density":
-            # Density requires spatial area information
-            if not isinstance(h3_df, gpd.GeoDataFrame):
-                raise Exception("method 'density' requires h3_df to be a GeoDataFrame.")
-
-            if h3_df.crs and h3_df.crs.is_geographic:
-                h3_df = h3_df.to_crs(h3_df.estimate_utm_crs())
-
-            agg_dict[col] = "mean"
-            agg_dict["h3_cell_area"] = "first"
-            h3_df[col] = h3_df[col].astype(float)
-            col_totals[col] = h3_df[col].sum()
-            h3_df[col] = h3_df[col] / h3_df.area
-
-            if "h3_cell_area" not in h3_df.columns:
-                h3_df["h3_cell_area"] = h3_df["h3_cell"].apply(
-                    lambda x: h3.cell_area(x, unit="m^2")
+            agg_dict[col] = pl.mean()
+            agg_dict["h3_cell_area"] = pl.first()
+            h3_df = h3_df.with_columns(
+                pl.col(col).cast(float)
+            )
+            col_totals[col] = h3_df.select(pl.col(col).sum())
+            if "area" not in h3_df.collect_schema().names():
+                raise Exception("area must be in columns of h3_df to apply density method.")
+            
+            h3_df = h3_df.with_columns(
+                (pl.col(col) / pl.col("area")).alias(col)
+            )
+            if "h3_cell_area" not in h3_df.collect_schema().names():
+                h3_df = h3_df.with_columns(
+                    pl.col(col)
+                    .map_elements(lambda x: h3.cell_area(x, unit="m^2"))
+                    .alias("h3_cell_area")
                 )
         elif m == "distribute":
-            agg_dict[col] = "sum"
-            h3_df[col] = h3_df[col].astype(float)
-            h3_df[col] = h3_df[col] / h3_df["h3_cell"].apply(
-                lambda x: len(x) if isinstance(x, list) else 1
-            )
+            agg_dict[col] = pl.sum()
+            is_list = isinstance(h3_df.schema["h3_cell"], pl.List)
+            if is_list:
+                h3_df = h3_df.with_columns(
+                    (
+                        pl.col(col).cast(float)
+                        / pl.col("h3_cell").list.len()
+                    ).alias(col)
+                )
+            else:
+                h3_df = h3_df.with_columns(
+                    (
+                        pl.col(col).cast(float)
+                        / pl.len().over("h3_cell")
+                    ).alias(col)
+                )
         else:
             raise NotImplementedError(f"Aggregation method '{m}' not implemented")
 
     # Explode list-valued H3 cells into rows
-    h3_df = h3_df[all_columns]
-    h3_df = (
-        h3_df
-        .explode("h3_cell")
-        .reset_index(drop=True)
-    )
+    h3_df = h3_df.select(all_columns)
+    h3_df = h3_df.explode("h3_cell")
 
     # Aggregate per H3 cell
-    result = h3_df.groupby("h3_cell").agg(agg_dict).reset_index()
+    result = h3_df.group_by("h3_cell").agg(agg_dict)
 
     # Re-normalize density totals if needed
     if len(col_totals) > 0:
         for col in col_totals:
-            result[col] *= result["h3_cell_area"]
-            result[col] *= col_totals[col] / result[col].sum()
+            result = result.with_columns(
+                (pl.col(col) * pl.col("h3_cell_area")).alias(col)
+            )
+            result = result.with_columns(
+                (pl.col(col) * (col_totals[col] / pl.col(col).sum())).alias(col)
+            )
 
     # Decode categorical columns back to original values
     if len(mapped_cols) > 0:
         for col in value_order:
             if value_order[col] is not None and len(value_order[col]) > 0:
-                mapping = {i: v for i, v in enumerate(value_order[col])}
-                result[col] = result[f"_{col}_int"].map(mapping).where(
-                    result[f"_{col}_int"].isin(value_order[col]),
-                    len(value_order[col]),
-                )
-                result = result.drop(columns=[f"_{col}_int"])
+                mapping = {
+                    i: v for i, v in enumerate(value_order[col])
+                }
+                # Use pl.when().then() chain
+                expr = None
+                for v, i in mapping.items():
+                    if expr is None:
+                        expr = pl.when(pl.col(f"_{col}_int") == i).then(v)
+                    else:
+                        expr = expr.when(pl.col(f"_{col}_int") == i).then(v)
 
+                # Handle nulls / unmapped values
+                expr = expr.otherwise(pl.lit(None))
+            
+                result = result.with_columns(
+                    expr.alias(col)
+                ).drop(f"_{col}_int")
+                
     # Drop rows with no aggregated values
-    result = result.dropna(
-        how="all",
-        subset=[col for col in result.columns if col != "h3_cell"],
+    cols = [c for c in result.columns if c != "h3_cell"]
+
+    result = result.filter(
+        ~pl.any_horizontal(pl.col(cols).is_null())
     )
 
-    return result.set_index("h3_cell")
+    return result
+
 
 # ------------------------------------------------------------------------------
 # High-level convenience wrapper
@@ -471,7 +503,7 @@ def from_gdf(
         "center_overlap",
     ] = "center_overlap",
     method: Union[str, Dict[str, str]] = "max",
-) -> pd.DataFrame:
+):
     """
     Rasterize a GeoDataFrame directly into aggregated H3 cells.
 
@@ -517,7 +549,16 @@ def from_gdf(
         buffer=buffer,
         contain=contain,
     )
+    if method == "density":
+        if h3_df.crs.is_projected == False:
+            h3_df = h3_df.to_crs(h3_df.estimate_utm_crs())
 
+        h3_df["area"] = h3_df.geometry.area
+
+    if "geometry" in h3_df.columns:
+        h3_df = h3_df.drop(columns="geometry")
+
+    h3_df = pl.from_pandas(pd.DataFrame(h3_df))
     return aggregate(
         h3_df,
         columns=columns,
@@ -543,7 +584,7 @@ def from_raster(
     transform: Affine | None = None,
     crs: CRS | None = None,
     nodata=None,
-) -> pd.DataFrame:
+):
     """
     Rasterize a raster dataset into aggregated H3 cells.
 
@@ -676,23 +717,20 @@ def from_raster(
 
     return df
 
-def resample(df,target_resolution,columns=[],value_order={},method='max',h3_column=None):
-    if h3_column is None:
-        h3_column = df.index.name
-        df = df.reset_index()
+def resample(df,target_resolution,columns=[],value_order={},method='max',h3_column="h3_cell"):
+    if h3_column not in df.collect_schema().names():
+        raise Exception(f"H3 cell column {h3_column} not in {df}")
 
-    df[h3_column] = df[h3_column].apply(lambda x: h3.cell_to_parent(x, target_resolution))
+    df = df.with_columns(
+        pl.col(h3_column).map_elements(lambda x: h3.cell_to_parent(x, target_resolution)).alias(h3_column)
+    )
     df = aggregate(df,columns,value_order,method,h3_column=h3_column)
     return df
 
 
-def to_gdf(df, h3_column=None):
-    df = df.copy()
-    if len(df) == 0:
-        return gpd.GeoDataFrame(df,geometry=[],crs=4326)
-    
-    if h3_column is not None:
-        df = df.set_index(h3_column)
+def to_gdf(df, h3_column="h3_cell"):
+    if h3_column not in df.collect_schema().names():
+        raise Exception(f"H3 cell column {h3_column} not in {df}")
 
     # --- Validation ---
     # Detect proper validation function (for H3 v3/v4)
@@ -703,74 +741,19 @@ def to_gdf(df, h3_column=None):
     else:
         raise AttributeError("Cannot find a valid H3 validation function in the h3 module.")
 
-    df = df[df.index.map(is_valid)]
-    if len(df) == 0:
-        raise Exception("No valid h3 cells in dataframe index")
-
+    df = df.with_columns(
+        pl.col(h3_column).map_elements(is_valid).alias(h3_column)
+    )
     # --- Build geometries ---
     def cell_to_polygon(cell):
         boundary = h3.cell_to_boundary(cell)
         return Polygon([(lng, lat) for lat, lng in boundary])
 
-    df["geometry"] = df.index.map(cell_to_polygon)
-    gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+    df = df.with_columns(
+        pl.col(h3_column).map_elements(cell_to_polygon).alias("geometry")
+    )
+    if isinstance(df,pl.LazyFrame):
+        df = df.collect()
+
+    gdf = gpd.GeoDataFrame(df.to_pandas(), geometry="geometry", crs="EPSG:4326")
     return gdf
-
-# def plot_h3_df(
-#     df: pd.DataFrame,
-#     value_column: str | None = None,
-#     h3_column: str = "h3_cell",
-#     ax=None,
-#     cmap: str = "viridis",
-#     alpha: float = 0.7,
-#     legend: bool = True
-# ):
-#     import geopandas as gpd
-#     import matplotlib.pyplot as plt
-#     import contextily as cx
-#     import shapely.geometry as geom
-#     import h3
-
-#     df = df.copy()
-
-#     # Validate
-#     if h3_column not in df.columns:
-#         raise ValueError(f"DataFrame must contain an '{h3_column}' column with H3 indices.")
-
-#     # Ensure all cells are valid strings
-#     df[h3_column] = df[h3_column].astype(str)
-
-#     # ✅ Use the correct validation function for h3>=4
-#     df = df[df[h3_column].apply(h3.is_valid_cell)]
-
-#     # Convert each H3 cell to a polygon geometry
-#     def cell_to_polygon(cell):
-#         boundary = h3.cell_to_boundary(cell)
-#         return geom.Polygon([(lng, lat) for lat, lng in boundary])  # note lat/lng order flip
-
-#     df["geometry"] = df[h3_column].apply(cell_to_polygon)
-
-#     # Convert to GeoDataFrame
-#     gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
-#     gdf = gdf.to_crs(epsg=3857)
-
-#     # Prepare axis
-#     if ax is None:
-#         _, ax = plt.subplots(figsize=(8, 8))
-#     ax.set_axis_off()
-
-#     # Plot polygons
-#     gdf.plot(
-#         ax=ax,
-#         column=value_column,
-#         cmap=cmap if value_column else None,
-#         alpha=alpha,
-#         edgecolor="k",
-#         linewidth=0.3,
-#         legend=legend if value_column else False,
-#         legend_kwds={"loc": "upper left"} if value_column else None,
-#     )
-
-#     cx.add_basemap(ax, crs=gdf.crs, source=cx.providers.CartoDB.Positron)
-
-#     return ax

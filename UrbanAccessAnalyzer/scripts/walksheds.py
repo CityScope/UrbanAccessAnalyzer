@@ -4,6 +4,7 @@ import argparse
 
 import geopandas as gpd 
 import pandas as pd
+import numpy as np
 import pyogrio
 import shapely 
 from shapely import wkt
@@ -262,13 +263,16 @@ if overwrite or (not os.path.isfile(accessibility_streets_path)):
             ] = min(distance_steps)
 
         def _clean(series):
-            series = series.replace({"nan": None, "None": None})
+            series = series.replace({"nan": None, "None": None, np.nan: None, pd.NA: None})
             # Convert np.nan/pd.NA to Python None
             series = series.where(series.notna(), None)
             return series.astype(object)
 
-        accessibility_edges[quality_str] = _clean(accessibility_edges[quality_str])
-        accessibility_nodes[quality_str] = _clean(accessibility_nodes[quality_str])
+        if quality_str in accessibility_edges.columns:
+            accessibility_edges[quality_str] = _clean(accessibility_edges[quality_str])
+
+        if quality_str in accessibility_nodes.columns:
+            accessibility_nodes[quality_str] = _clean(accessibility_nodes[quality_str])
 
         accessibility_graph = ox.graph_from_gdfs(accessibility_nodes, accessibility_edges)
         if quality_str in accessibility_edges.columns:
@@ -286,26 +290,11 @@ else:
 
 if do_h3:
     if overwrite or (not os.path.isfile(h3_results_path)):
-        # aoi['id'] = 0
-        # ls_h3_df = h3_utils.from_gdf(aoi,value_column='id',value_order = [0], resolution=h3_resolution, method='first')
-        # ls_h3_df = ls_h3_df[~ls_h3_df.index.duplicated(keep='first')]
-        # ls_h3_df = ls_h3_df.drop(columns=ls_h3_df.columns)
-        h3_frames = []
-
-        for column in accessibility_columns:
-            accessibility_edges[column] = accessibility_edges[column].astype(str).replace({"nan": None, "None": None})
-            new_ls_h3_df = h3_utils.from_gdf(
-                accessibility_edges[[column, 'geometry']],
-                resolution=h3_resolution,
-                value_column=column,
-                value_order=[str(i) for i in distance_steps],
-                buffer=10,
-                method='first'
-            )[[column]]
-
-            h3_frames.append(new_ls_h3_df)
-
-        ls_h3_df = pd.concat(h3_frames, axis=1, join="outer")
-        ls_h3_df = ls_h3_df.copy()  # defragment
-
-        ls_h3_df.reset_index().to_csv(h3_results_path)
+        h3_df = h3_utils.from_gdf(
+            accessibility_edges,
+            resolution=h3_resolution,
+            buffer=10,
+            contain="overlap",
+            method="max"
+        )
+        h3_df.reset_index().to_csv(h3_results_path)

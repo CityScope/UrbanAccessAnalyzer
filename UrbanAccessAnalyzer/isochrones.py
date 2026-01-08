@@ -69,20 +69,20 @@ def __distance_matrix_to_processing_order(distance_matrix, accessibility_values)
             labels = list(accessibility_values)
 
         # Build DataFrame
-        ls_process_order_df = pd.DataFrame(
+        process_order_df = pd.DataFrame(
             {
-                "ls_id": range(1, len(distances) + 1),
+                "accessibility_int": range(1, len(distances) + 1),
                 "distance": distances,
                 "service_quality": 1,
-                "ls": labels,
+                "accessibility_value": labels,
             }
         )
-        ls_process_order_df["distance"] = ls_process_order_df["distance"].astype(float)
+        process_order_df["distance"] = process_order_df["distance"].astype(float)
         
-        ls_process_order_df = ls_process_order_df.sort_values(
-            ["ls_id", "distance"], ascending=False
+        process_order_df = process_order_df.sort_values(
+            ["accessibility_int", "distance"], ascending=False
         )
-        return ls_process_order_df
+        return process_order_df
 
     if "service_quality" not in distance_matrix:
         raise Exception("Column service_quality should always exist in distance_matrix")
@@ -93,40 +93,40 @@ def __distance_matrix_to_processing_order(distance_matrix, accessibility_values)
 
     # Melt the dataframe to long format for easier processing
     melted = distance_matrix.melt(
-        id_vars="service_quality", var_name="distance", value_name="ls"
+        id_vars="service_quality", var_name="distance", value_name="accessibility_value"
     )
     melted["distance"] = melted["distance"].astype(float)
 
     # For each service_quality and value, find the max distance
-    ls_process_order_df = (
-        melted.groupby(["service_quality", "ls"])["distance"].max().reset_index()
+    process_order_df = (
+        melted.groupby(["service_quality", "accessibility_value"])["distance"].max().reset_index()
     )
-    ls_process_order_df["ls_id"] = ls_process_order_df["ls"].replace(
+    process_order_df["accessibility_int"] = process_order_df["accessibility_value"].replace(
         {accessibility_values[i]: str(i) for i in range(len(accessibility_values))}
     )
-    ls_process_order_df["ls_id"] = ls_process_order_df["ls_id"].astype(int)
-    ls_process_order_df = (
-        ls_process_order_df.groupby(["ls_id", "distance"])
-        .agg({"service_quality": list, "ls": "first"})
+    process_order_df["accessibility_int"] = process_order_df["accessibility_int"].astype(int)
+    process_order_df = (
+        process_order_df.groupby(["accessibility_int", "distance"])
+        .agg({"service_quality": list, "accessibility_value": "first"})
         .reset_index()
     )
-    ls_process_order_df = ls_process_order_df.sort_values(
-        ["ls_id", "distance"], ascending=False
+    process_order_df = process_order_df.sort_values(
+        ["accessibility_int", "distance"], ascending=False
     )
-    return ls_process_order_df
+    return process_order_df
 
 
-def __compute_isochrones(G, points, ls_process_order_df, service_quality_col=None, verbose:bool=True):
+def __compute_isochrones(G, points, process_order_df, service_quality_col=None, verbose:bool=True):
     H = G.copy()
     if service_quality_col is None:
         points["__service_quality"] = 1
         service_quality_col = "__service_quality"
 
     for quality, distance, accessibility in tqdm(
-        ls_process_order_df[["service_quality", "distance", "ls"]].itertuples(
+        process_order_df[["service_quality", "distance", "accessibility_value"]].itertuples(
             index=False, name=None
         ),
-        total=len(ls_process_order_df),
+        total=len(process_order_df),
         disable=not verbose,
     ):
         if isinstance(quality, int):
@@ -282,7 +282,7 @@ def __set_edge_accessibility(
     # ---- Final cleaning: remove any 'nan'/'None' strings and unify missing values ----
 
     def _clean(series):
-        series = series.replace({"nan": None, "None": None})
+        series = series.replace({"nan": None, "None": None, np.nan: None, pd.NA: None})
         # Convert np.nan/pd.NA to Python None
         series = series.where(series.notna(), None)
         return series.astype(object)
@@ -297,8 +297,8 @@ def __set_edge_accessibility(
     return edges_gdf, nodes_gdf
 
 
-def __exact_isochrones(G, ls_process_order_df, min_edge_length):
-    accessibility_values = list(ls_process_order_df["ls"].drop_duplicates())
+def __exact_isochrones(G, process_order_df, min_edge_length):
+    accessibility_values = list(process_order_df["accessibility_value"].drop_duplicates())
     accessibility_values.reverse()
 
     nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
@@ -309,7 +309,7 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
     ]
 
     accessibility_values = [
-        ls for ls in accessibility_values if f"remaining_dist_{ls}" in remaining_dist_cols
+        a for a in accessibility_values if f"remaining_dist_{a}" in remaining_dist_cols
     ]
 
 
@@ -345,9 +345,9 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
 
     nodes_gdf["accessibility"] = None
     for i in range(len(accessibility_values)):
-        ls = accessibility_values[len(accessibility_values) - 1 - i]
-        col = f"remaining_dist_{ls}"
-        nodes_gdf.loc[nodes_gdf[col] > min_edge_length, "accessibility"] = ls
+        a = accessibility_values[len(accessibility_values) - 1 - i]
+        col = f"remaining_dist_{a}"
+        nodes_gdf.loc[nodes_gdf[col] > min_edge_length, "accessibility"] = a
 
     nodes_gdf = nodes_gdf.drop(columns=remaining_dist_cols)
 
@@ -360,38 +360,38 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
     edges_gdf[f"last_accessibility_{accessibility_values[-1]}_v"] = None
 
     for i in range(len(accessibility_values)):
-        ls = accessibility_values[len(accessibility_values) - 1 - i]
-        remaining_ls = accessibility_values[0 : (len(accessibility_values) - i - 1)]
+        a = accessibility_values[len(accessibility_values) - 1 - i]
+        remaining_acc_value = accessibility_values[0 : (len(accessibility_values) - i - 1)]
         # remaining_ls = [ls for ls in accessibility_values[0:(len(accessibility_values)-i-1)]
         #                 if ls in remaining_dist_cols]
-        col = f"remaining_dist_{ls}"
+        col = f"remaining_dist_{a}"
         edges_gdf.loc[
             (edges_gdf[col + "_u"] + edges_gdf[col + "_v"])
             > (edges_gdf["length"] - min_edge_length),
             "accessibility",
-        ] = ls
+        ] = a
         if i < (len(accessibility_values) - 1):
             mask_u = (
-                edges_gdf[[f"remaining_dist_{j}_u" for j in remaining_ls]].max(axis=1)
+                edges_gdf[[f"remaining_dist_{j}_u" for j in remaining_acc_value]].max(axis=1)
                 < edges_gdf[col + "_u"]
             )
             mask_v = (
-                edges_gdf[[f"remaining_dist_{j}_u" for j in remaining_ls]].max(axis=1)
+                edges_gdf[[f"remaining_dist_{j}_u" for j in remaining_acc_value]].max(axis=1)
                 < edges_gdf[col + "_v"]
             )
             edges_gdf.loc[
                 mask_u & (edges_gdf[col + "_u"] > min_edge_length),
-                [f"last_accessibility_{j}_u" for j in remaining_ls],
-            ] = ls
+                [f"last_accessibility_{j}_u" for j in remaining_acc_value],
+            ] = a
             edges_gdf.loc[
                 mask_v & (edges_gdf[col + "_v"] > min_edge_length),
-                [f"last_accessibility_{j}_v" for j in remaining_ls],
-            ] = ls
+                [f"last_accessibility_{j}_v" for j in remaining_acc_value],
+            ] = a
 
     dist_u = np.zeros(len(edges_gdf))
     dist_v = np.zeros(len(edges_gdf))
-    for ls in accessibility_values:
-        col = f"remaining_dist_{ls}"
+    for a in accessibility_values:
+        col = f"remaining_dist_{a}"
         new_dist_u = np.maximum(edges_gdf[col + "_u"].to_numpy(), dist_u)
         new_dist_v = np.maximum(edges_gdf[col + "_v"].to_numpy(), dist_v)
 
@@ -521,7 +521,7 @@ def __exact_isochrones(G, ls_process_order_df, min_edge_length):
     )
 
     def _clean(series):
-        series = series.replace({"nan": None, "None": None})
+        series = series.replace({"nan": None, "None": None, np.nan: None, pd.NA: None})
         # Convert np.nan/pd.NA to Python None
         series = series.where(series.notna(), None)
         return series.astype(object)
@@ -544,8 +544,9 @@ def graph(
     verbose:bool=True
 ):
     if service_quality_col is None:
-        points['service_quality_col'] = 1 
-
+        points['_service_quality_col'] = 1 
+        service_quality_col = '_service_quality_col'
+        
     return_points = False
 
     if "osmid" not in points.columns:
@@ -564,19 +565,19 @@ def graph(
         warnings.warn("Points are too far away from edges. No isochrones returned.", UserWarning)
         return G
 
-    ls_process_order_df = __distance_matrix_to_processing_order(
+    process_order_df = __distance_matrix_to_processing_order(
         distance_matrix=distance_matrix, accessibility_values=accessibility_values
     )
     H = __compute_isochrones(
         H,
         points=points,
-        ls_process_order_df=ls_process_order_df,
+        process_order_df=process_order_df,
         service_quality_col=service_quality_col,
         verbose=verbose
     )
 
     H = __exact_isochrones(
-        H, ls_process_order_df=ls_process_order_df, min_edge_length=min_edge_length
+        H, process_order_df=process_order_df, min_edge_length=min_edge_length
     )
     if return_points:
         return H, points
@@ -595,20 +596,20 @@ def buffers(
         service_geoms["__service_quality"] = 1
         service_quality_col = "__service_quality"
 
-    ls_process_order_df = __distance_matrix_to_processing_order(
+    process_order_df = __distance_matrix_to_processing_order(
         distance_matrix=distance_matrix, accessibility_values=accessibility_values
     )
 
-    accessibility_values_list = list(ls_process_order_df["ls"].drop_duplicates())
+    accessibility_values_list = list(process_order_df["accessibility_value"].drop_duplicates())
     accessibility_values_list.reverse()
     buffers = {
-        ls:[] for ls in accessibility_values_list
+        a:[] for a in accessibility_values_list
     }
     for quality, distance, accessibility in tqdm(
-        ls_process_order_df[["service_quality", "distance", "ls"]].itertuples(
+        process_order_df[["service_quality", "distance", "accessibility_value"]].itertuples(
             index=False, name=None
         ),
-        total=len(ls_process_order_df),
+        total=len(process_order_df),
         disable=not verbose,
     ):
         if isinstance(quality, int):
