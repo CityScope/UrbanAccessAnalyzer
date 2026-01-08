@@ -293,8 +293,9 @@ if do_h3:
         h3_df = h3_utils.from_gdf(
             accessibility_edges,
             resolution=h3_resolution,
+            value_order=accessibility_values,
             buffer=10,
             contain="overlap",
-            method="max"
+            method="first"
         )
         h3_df.reset_index().to_csv(h3_results_path)
