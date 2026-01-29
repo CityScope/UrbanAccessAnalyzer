@@ -17,54 +17,65 @@ Or maybe it is right and the distance_matrix is the reason. This happened with t
 TODO: Add source node_id to the accessibility info. 
 """
 
-def default_distance_matrix(poi, distance_steps, service_quality_column="service_quality"):
+def default_distance_matrix(
+    poi,
+    distance_steps,
+    service_quality_column="service_quality"
+):
     """
-    Create a diagonal-like distance vs service_quality DataFrame and return unique levels.
+    Create a diagonal-like distance vs service_quality DataFrame with
+    accessibility values in the range [0, 1], rounded to 3 decimals.
 
-    Parameters
-    ----------
-    service_quality : list
-        Ordered list of service quality levels (best to worst), e.g., ['I','II','III'].
-    distance_steps : list
-        Ordered list of distance steps (best to worst), e.g., [250, 500, 1000].
-
-    Returns
-    -------
-    df : pandas.DataFrame
-        DataFrame with service_quality as rows, distance_steps as columns,
-        and letters ('A','B','C',...) forming a diagonal pattern.
-    accessibility_values : list
-        Sorted list of unique letters used in the DataFrame.
+    Always includes service_quality = 0 with accessibility = 0.
     """
-    service_quality = np.unique(poi[service_quality_column].dropna())
-    # Create letters for values
-    letters = list(string.ascii_uppercase)
 
-    # Initialize empty DataFrame
-    df = pd.DataFrame(index=service_quality, columns=distance_steps)
+    # Unique service quality levels
+    service_quality = poi[service_quality_column].dropna().unique()
 
-    # Fill in diagonal pattern
+    # Always include 0
+    service_quality = np.unique(np.append(service_quality, 0.0))
+
+    # Sort best → worst
+    service_quality = np.sort(service_quality)[::-1]
+
+    n_sq = len(service_quality)
+    n_dist = len(distance_steps)
+
+    max_idx = n_sq + n_dist - 2
+
+    df = pd.DataFrame(index=service_quality, columns=distance_steps, dtype=float)
+
     for i, sq in enumerate(service_quality):
         for j, dist in enumerate(distance_steps):
-            idx = min(i + j, len(letters) - 1)  # prevent out-of-range
-            df.at[sq, dist] = letters[idx]
 
-    # Extract unique letters used, sorted in order
-    accessibility_values = sorted(df.stack().unique(), key=lambda x: letters.index(x))
+            if sq == 0:
+                value = 0.0
+            else:
+                idx = i + j
+                value = 1.0 - (idx / max_idx)
+                value = max(value, 0.0)
 
-    df[service_quality_column] = df.index 
+            df.at[sq, dist] = round(value, 3)
+
+    df = df[~np.isclose(df.index, 0)]
+    # Unique accessibility values (best → worst)
+    accessibility_values = sorted(
+        df.stack().unique(), reverse=True
+    )
+
+    df[service_quality_column] = df.index
     df = df.reset_index(drop=True)
 
     return df, accessibility_values
 
 
-def __distance_matrix_to_processing_order(distance_matrix, accessibility_values):
+def __distance_matrix_to_processing_order(distance_matrix, accessibility_values=None):
     if isinstance(distance_matrix, list):
         distances = [float(d) for d in distance_matrix]
 
         # Generate labels A, B, C... for each row
         if accessibility_values is None:
-            labels = list(string.ascii_uppercase[: len(distances)])
+            labels = list(distance_matrix)
         else:
             labels = list(accessibility_values)
 
@@ -89,13 +100,34 @@ def __distance_matrix_to_processing_order(distance_matrix, accessibility_values)
 
     if accessibility_values is None:
         accessibility_values = distance_matrix.drop(columns=["service_quality"]).to_numpy()
-        accessibility_values = list(np.unique(accessibility_values))
+        accessibility_values = np.unique(accessibility_values)[::-1].tolist()
 
+    accessibility_values = [f"{round(float(v), 3):.3f}" 
+                        if isinstance(v, (float, np.floating, int)) 
+                        else None if v in [None, 'nan', 'None', pd.NA] 
+                        else str(v)
+                        for v in accessibility_values]
+
+    distance_matrix["service_quality"] = distance_matrix["service_quality"].apply(
+        lambda v: f"{round(float(v), 3):.3f}" 
+                if isinstance(v, (float, np.floating, int)) 
+                else None 
+                if v in [None, 'nan', 'None', pd.NA] 
+                else str(v)
+    )
     # Melt the dataframe to long format for easier processing
     melted = distance_matrix.melt(
         id_vars="service_quality", var_name="distance", value_name="accessibility_value"
     )
     melted["distance"] = melted["distance"].astype(float)
+    melted["accessibility_value"] = melted["accessibility_value"].apply(
+        lambda v: f"{round(float(v), 3):.3f}" 
+                if isinstance(v, (float, np.floating, int)) 
+                else None 
+                if v in [None, 'nan', 'None', pd.NA] 
+                else str(v)
+    )
+
 
     # For each service_quality and value, find the max distance
     process_order_df = (
@@ -121,6 +153,14 @@ def __compute_isochrones(G, points, process_order_df, service_quality_col=None, 
     if service_quality_col is None:
         points["__service_quality"] = 1
         service_quality_col = "__service_quality"
+
+    points[service_quality_col] = points[service_quality_col].apply(
+        lambda v: f"{round(float(v), 3):.3f}" 
+                if isinstance(v, (float, np.floating, int)) 
+                else None 
+                if v in [None, 'nan', 'None', pd.NA] 
+                else str(v)
+    )
 
     for quality, distance, accessibility in tqdm(
         process_order_df[["service_quality", "distance", "accessibility_value"]].itertuples(
@@ -278,17 +318,6 @@ def __set_edge_accessibility(
         .astype(str)
         .replace(priority_map_rev)
     )
-
-    # ---- Final cleaning: remove any 'nan'/'None' strings and unify missing values ----
-
-    def _clean(series):
-        series = series.replace({"nan": None, "None": None, np.nan: None, pd.NA: None})
-        # Convert np.nan/pd.NA to Python None
-        series = series.where(series.notna(), None)
-        return series.astype(object)
-
-    edges_gdf["accessibility"] = _clean(edges_gdf["accessibility"])
-    nodes_gdf["accessibility"] = _clean(nodes_gdf["accessibility"])
 
     # ---- Restore indices ----
     edges_gdf = edges_gdf.set_index(["u", "v", "key"])
@@ -520,15 +549,6 @@ def __exact_isochrones(G, process_order_df, min_edge_length):
         iso_nodes_gdf, edges_gdf, priority_map, max_priority_map, priority_map_rev
     )
 
-    def _clean(series):
-        series = series.replace({"nan": None, "None": None, np.nan: None, pd.NA: None})
-        # Convert np.nan/pd.NA to Python None
-        series = series.where(series.notna(), None)
-        return series.astype(object)
-
-    nodes_gdf["accessibility"] = _clean(nodes_gdf["accessibility"])
-    edges_gdf["accessibility"] = _clean(edges_gdf["accessibility"])
-
     H = ox.graph_from_gdfs(nodes_gdf, edges_gdf, graph_attrs=G.graph)
     return H
 
@@ -543,6 +563,7 @@ def graph(
     max_dist=None,
     verbose:bool=True
 ):
+    points = points.copy()
     if service_quality_col is None:
         points['_service_quality_col'] = 1 
         service_quality_col = '_service_quality_col'
@@ -579,6 +600,36 @@ def graph(
     H = __exact_isochrones(
         H, process_order_df=process_order_df, min_edge_length=min_edge_length
     )
+    def _clean(series: pd.Series) -> pd.Series:
+        # Step 1: Replace common "null" representations with actual None
+        series = series.replace({"nan": None, "None": None, np.nan: None, pd.NA: None})
+        
+        # Step 2: Ensure actual NaNs are replaced with None
+        series = series.where(series.notna(), None)
+        
+        # Step 3: Try to infer numeric types if possible
+        def try_convert(val):
+            if val is None:
+                return None
+            try:
+                # Try converting to float first
+                fval = float(val)
+                # If integer-like, convert to int
+                if fval.is_integer():
+                    return int(fval)
+                return fval
+            except (ValueError, TypeError):
+                # If it cannot be converted, keep as original
+                return val
+        
+        series = series.map(try_convert)
+        
+        return series
+    
+    nodes_gdf, edges_gdf = ox.graph_to_gdfs(H)
+    nodes_gdf["accessibility"] = _clean(nodes_gdf["accessibility"])
+    edges_gdf["accessibility"] = _clean(edges_gdf["accessibility"])
+    H = ox.graph_from_gdfs(nodes_gdf, edges_gdf, graph_attrs=H.graph)
     if return_points:
         return H, points
     
@@ -589,12 +640,21 @@ def graph(
 def buffers(
     service_geoms, distance_matrix, accessibility_values, service_quality_col, verbose:bool=True
 ):
+    service_geoms = service_geoms.copy()
     if service_geoms.crs.is_geographic:
         service_geoms = service_geoms.to_crs(service_geoms.estimate_utm_crs())
 
     if service_quality_col is None:
         service_geoms["__service_quality"] = 1
         service_quality_col = "__service_quality"
+
+    service_geoms[service_quality_col] = service_geoms[service_quality_col].apply(
+        lambda v: f"{round(float(v), 3):.3f}" 
+                if isinstance(v, (float, np.floating, int)) 
+                else None 
+                if v in [None, 'nan', 'None', pd.NA] 
+                else str(v)
+    )
 
     process_order_df = __distance_matrix_to_processing_order(
         distance_matrix=distance_matrix, accessibility_values=accessibility_values
@@ -636,5 +696,33 @@ def buffers(
 
 
     result = gpd.GeoDataFrame(rows, crs=service_geoms.crs)
-    return result.sort_values("accessibility_int")
+    result = result.sort_values("accessibility_int")
+    def _clean(series: pd.Series) -> pd.Series:
+        # Step 1: Replace common "null" representations with actual None
+        series = series.replace({"nan": None, "None": None, np.nan: None, pd.NA: None})
+        
+        # Step 2: Ensure actual NaNs are replaced with None
+        series = series.where(series.notna(), None)
+        
+        # Step 3: Try to infer numeric types if possible
+        def try_convert(val):
+            if val is None:
+                return None
+            try:
+                # Try converting to float first
+                fval = float(val)
+                # If integer-like, convert to int
+                if fval.is_integer():
+                    return int(fval)
+                return fval
+            except (ValueError, TypeError):
+                # If it cannot be converted, keep as original
+                return val
+        
+        series = series.map(try_convert)
+        
+        return series
+    
+    result['accessibility'] = _clean(result["accessibility"])
+    return result
 

@@ -98,6 +98,9 @@ def quality_by_values(values: list | pd.Series, value_priority: list):
 
     # Map values to priorities
     result = str_values.map(value_to_priority)
+    result = result[::-1]
+    result /= np.max(result)
+    result = np.round(result, 3)
 
     return result.tolist()
 
@@ -126,6 +129,9 @@ def quality_by_area(gdf: gpd.GeoDataFrame | gpd.GeoSeries, area_steps: list[floa
         else:
             gdf.loc[gdf.geometry.area > area_steps[j], '_service_quality'] = i + 1
             
+    gdf['_service_quality'] = list(gdf['_service_quality'].max() + 1 - gdf['_service_quality'])
+    gdf['_service_quality'] = list(gdf['_service_quality'] / gdf['_service_quality'].max())
+    gdf['_service_quality'] = gdf['_service_quality'].round(3)
     return list(gdf['_service_quality'])
 
 

@@ -137,7 +137,7 @@ def general_map(
         poi_column = column 
 
     if poi_column:
-        values = [p[column].dropna() for p in pois if poi_column in p.columns]
+        values = [p[poi_column].dropna() for p in pois if poi_column in p.columns]
         if values:
             if poi_vmin is None:
                 poi_vmin = min(v.min() for v in values)
@@ -276,7 +276,7 @@ def general_map(
                         vmin=poi_vmin,
                         vmax=poi_vmax,
                         legend=legend,
-                        style_kwds={"fillOpacity": poi_opacity},
+                        style_kwds={"color": "black","fillOpacity": poi_opacity,"weight": 1,},
                     )
                     legend = False
                 else:
