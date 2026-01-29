@@ -104,19 +104,17 @@ def cells_in_geometry(
     else:
         # Ensure WGS84 when no buffering is applied
         gdf = gdf.to_crs(4326)
-
-    # Replace geometries with centroids if requested
-    if contain == "centroid":
-        gdf = gdf.centroid
-
+        
     # Prepare output column
     gdf["h3_cells"] = None
 
     # Apply explicit buffer when requested
     if buffer > 0:
-        if gdf.crs.is_geographic:
-            gdf = gdf.to_crs(gdf.estimate_utm_crs())
         gdf["geometry"] = gdf.geometry.buffer(buffer)
+
+    # Replace geometries with centroids if requested
+    if contain == "centroid":
+        gdf = gdf.centroid
 
     # Flatten GeometryCollections into a single geometry
     mask_gc = gdf.geom_type == GEOMETRY_COLLECTION_TYPE
