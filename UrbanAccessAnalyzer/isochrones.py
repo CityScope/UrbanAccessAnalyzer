@@ -583,6 +583,10 @@ def graph(
         warnings.warn("Points are too far away from edges. No isochrones returned.", UserWarning)
         return G
 
+    if isinstance(distance_matrix,pd.DataFrame) and service_quality_col is not None:
+        if service_quality_col in distance_matrix.columns and 'service_quality' not in distance_matrix.columns:
+            distance_matrix = distance_matrix.rename(columns={service_quality_col:'service_quality'})
+
     process_order_df = __distance_matrix_to_processing_order(
         distance_matrix=distance_matrix, accessibility_values=accessibility_values
     )
@@ -631,6 +635,10 @@ def buffers(
     service_geoms[service_quality_col] = service_geoms[service_quality_col].map(
         __format_quality
     )
+
+    if isinstance(distance_matrix,pd.DataFrame) and service_quality_col is not None:
+        if service_quality_col in distance_matrix.columns and 'service_quality' not in distance_matrix.columns:
+            distance_matrix = distance_matrix.rename(columns={service_quality_col:'service_quality'})
 
     process_order_df = __distance_matrix_to_processing_order(
         distance_matrix=distance_matrix, accessibility_values=accessibility_values

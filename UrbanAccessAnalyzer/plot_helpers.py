@@ -48,14 +48,17 @@ def general_map(
         out = []
         for g in objs:
             if isinstance(g, gpd.GeoDataFrame):
-                out.append(g.to_crs(4326))
+                g = g.to_crs(4326)
             elif (
                 isinstance(g, pd.DataFrame) and 
                 ("h3_cell" in g.columns or ("h3_cell" == g.index.name))
             ):
-                out.append(h3_utils.to_gdf(g).to_crs(4326))
+                g = h3_utils.to_gdf(g).to_crs(4326)
             else:
                 raise ValueError("Unsupported GeoDataFrame input")
+            
+            g = g[g.geometry.is_valid]
+            out.append(g)
         return out
 
     if not isinstance(gdfs, list):
@@ -82,24 +85,10 @@ def general_map(
     if m is None:
         m = folium.Map(
             location=[centroid.y, centroid.x],
-            zoom_start=10,
+            zoom_start=12,
             tiles="CartoDB positron",
         )
 
-    # ------------------------------------------------------------------
-    # AOI outline & clipping
-    # ------------------------------------------------------------------
-    if aoi is not None:
-        m = aoi.explore(
-            m=m,
-            color="blue",
-            fill=False,
-            style_kwds={"weight": 4, "dashArray": "5,5", "opacity": 1.0},
-        )
-
-        gdfs = [g[g.intersects(aoi.union_all())] for g in gdfs]
-        if pois:
-            pois = [p[p.intersects(aoi.union_all())] for p in pois]
 
     # ------------------------------------------------------------------
     # Helpers
@@ -125,6 +114,18 @@ def general_map(
     # ------------------------------------------------------------------
     # vmin / vmax for gdfs
     # ------------------------------------------------------------------
+    if poi_cmap is None:
+        poi_cmap = cmap 
+
+    if poi_color is None:
+        poi_color = color 
+
+    if poi_vmin is None:
+        poi_vmin = vmin 
+    
+    if poi_vmax is None:
+        poi_vmax = vmax 
+        
     if column:
         values = [g[column].dropna() for g in gdfs if column in g.columns]
         if values:
@@ -143,12 +144,6 @@ def general_map(
                 poi_vmin = min(v.min() for v in values)
             if poi_vmax is None:
                 poi_vmax = max(v.max() for v in values)
-
-    if poi_cmap is None:
-        poi_cmap = cmap 
-
-    if poi_color is None:
-        poi_color = color 
 
     # ------------------------------------------------------------------
     # Draw gdfs
@@ -262,118 +257,133 @@ def general_map(
     # ------------------------------------------------------------------
     # POIs
     # ------------------------------------------------------------------
-    if pois:
-        legend = True
-        for p in pois:
-            polys, lines, points = split_geoms(p)
+    legend = True
+    for p in pois:
+        polys, lines, points = split_geoms(p)
 
-            if not polys.empty:
-                if is_thematic(polys, poi_column, poi_cmap):
-                    m = polys.explore(
-                        m=m,
-                        column=poi_column,
-                        cmap=poi_cmap,
-                        vmin=poi_vmin,
-                        vmax=poi_vmax,
-                        legend=legend,
-                        style_kwds={"color": "black","fillOpacity": poi_opacity,"weight": 1,},
-                    )
-                    legend = False
-                else:
-                    m = polys.explore(
-                        m=m,
-                        style_kwds={
-                            "color": "black",
-                            "fillColor": poi_color,
-                            "fillOpacity": poi_opacity,
-                            "weight": 1,
-                        },
-                    )
-            if not lines.empty:
-                if is_thematic(lines, poi_column, poi_cmap):
-                    m = lines.explore(
-                        m=m,
-                        column=poi_column,
-                        cmap=poi_cmap,
-                        vmin=poi_vmin,
-                        vmax=poi_vmax,
-                        legend=legend,
-                        style_kwds={"weight": 2},
-                    )
-                else:
-                    m = lines.explore(
-                        m=m,
-                        color=poi_color,
-                        style_kwds={"weight": 2},
-                    )
+        if not polys.empty:
+            if is_thematic(polys, poi_column, poi_cmap):
+                m = polys.explore(
+                    m=m,
+                    column=poi_column,
+                    cmap=poi_cmap,
+                    vmin=poi_vmin,
+                    vmax=poi_vmax,
+                    legend=legend,
+                    style_kwds={"color": "black","fillOpacity": poi_opacity,"weight": 1,},
+                )
+                legend = False
+            else:
+                m = polys.explore(
+                    m=m,
+                    style_kwds={
+                        "color": "black",
+                        "fillColor": poi_color,
+                        "fillOpacity": poi_opacity,
+                        "weight": 1,
+                    },
+                )
+        if not lines.empty:
+            if is_thematic(lines, poi_column, poi_cmap):
+                m = lines.explore(
+                    m=m,
+                    column=poi_column,
+                    cmap=poi_cmap,
+                    vmin=poi_vmin,
+                    vmax=poi_vmax,
+                    legend=legend,
+                    style_kwds={"weight": 2},
+                )
+            else:
+                m = lines.explore(
+                    m=m,
+                    color=poi_color,
+                    style_kwds={"weight": 2},
+                )
 
-            if not points.empty:
-                # Determine if theming is active
-                thematic = is_thematic(points, poi_column, poi_cmap)
+        if not points.empty:
+            # Determine if theming is active
+            thematic = is_thematic(points, poi_column, poi_cmap)
 
-                # Handle categorical color mapping
-                color_map = {}
-                if thematic and points[poi_column].dtype == "object":
-                    categories = points[poi_column].unique()
-                    cmap = mpl_colormaps[poi_cmap]
-                    color_map = {
-                        cat: colors.to_hex(cmap(i / len(categories))) for i, cat in enumerate(categories)
-                    }
+            # Handle categorical color mapping
+            color_map = {}
+            if thematic and points[poi_column].dtype == "object":
+                categories = points[poi_column].unique()
+                cmap = mpl_colormaps[poi_cmap]
+                color_map = {
+                    cat: colors.to_hex(cmap(i / len(categories))) for i, cat in enumerate(categories)
+                }
 
-                # Prepare colormap for numeric data if needed
-                elif thematic:
-                    cmap = mpl_colormaps[poi_cmap]
-                    norm = colors.Normalize(vmin=poi_vmin, vmax=poi_vmax)
+            # Prepare colormap for numeric data if needed
+            elif thematic:
+                cmap = mpl_colormaps[poi_cmap]
+                norm = colors.Normalize(vmin=poi_vmin, vmax=poi_vmax)
 
-                # Compute colors safely
-                def compute_color(row):
-                    if thematic:
-                        if points[poi_column].dtype == "object":
-                            color_val = color_map.get(row[poi_column], "#000000")
-                        else:
-                            color_val = colors.to_hex(cmap(norm(row[poi_column])))
+            # Compute colors safely
+            def compute_color(row):
+                if thematic:
+                    if points[poi_column].dtype == "object":
+                        color_val = color_map.get(row[poi_column], "#000000")
                     else:
-                        color_val = poi_color
-                    return str(color_val) if color_val else "#000000"
+                        color_val = colors.to_hex(cmap(norm(row[poi_column])))
+                else:
+                    color_val = poi_color
+                return str(color_val) if color_val else "#000000"
 
-                # Assign colors to _color column
-                points["_color"] = points.apply(compute_color, axis=1).astype(str)
+            # Assign colors to _color column
+            points["_color"] = points.apply(compute_color, axis=1).astype(str)
 
-                # Convert to EPSG:4326 for Folium
-                points_geojson = points.to_crs(4326).copy()
+            # Convert to EPSG:4326 for Folium
+            points_geojson = points.to_crs(4326).copy()
 
-                # Keep only JSON-serializable columns + _color + geometry
-                serializable_cols = [
-                    c for c in points_geojson.columns
-                    if c != points_geojson.geometry.name
-                    and points_geojson[c].apply(lambda x: isinstance(x, (str, int, float, type(None)))).all()
-                ]
-                points_geojson = points_geojson[serializable_cols + [points_geojson.geometry.name]]
+            # Keep only JSON-serializable columns + _color + geometry
+            serializable_cols = [
+                c for c in points_geojson.columns
+                if c != points_geojson.geometry.name
+                and points_geojson[c].apply(lambda x: isinstance(x, (str, int, float, type(None)))).all()
+            ]
+            for col in list(set(points_geojson.columns) - set(serializable_cols)):
+                if col == points_geojson.geometry.name:
+                    continue 
+                
+                try:
+                    points_geojson[col] = points_geojson[col].astype(str)
+                    serializable_cols.append(col)
+                except:
+                    None
 
-                # GeoJson layer for polygons or data preview
-                folium.GeoJson(
-                    points_geojson.__geo_interface__,
-                    tooltip=folium.GeoJsonTooltip(
-                        fields=[c for c in serializable_cols],
-                        aliases=[f"{c}:" for c in serializable_cols],
-                        sticky=True,
-                        labels=True,
+            points_geojson = points_geojson[serializable_cols + [points_geojson.geometry.name]]
+
+            # Add proper Markers using BeautifyIcon
+            for _, row in points_geojson.iterrows():
+                tooltip_text = "<br>".join(f"{c}: {row[c]}" for c in serializable_cols if c != "_color")
+                folium.Marker(
+                    location=[row.geometry.y, row.geometry.x],
+                    icon=BeautifyIcon(
+                        icon="circle",
+                        icon_shape="marker",
+                        background_color=row["_color"],
+                        border_color="black",
+                        text_color="white",
                     ),
+                    tooltip=tooltip_text,
+                    legend=legend
                 ).add_to(m)
+                legend=False
 
-                # Add proper Markers using BeautifyIcon
-                for _, row in points_geojson.iterrows():
-                    tooltip_text = "<br>".join(f"{c}: {row[c]}" for c in serializable_cols if c != "_color")
-                    folium.Marker(
-                        location=[row.geometry.y, row.geometry.x],
-                        icon=BeautifyIcon(
-                            icon="circle",
-                            icon_shape="marker",
-                            background_color=row["_color"],
-                            border_color="black",
-                            text_color="white",
-                        ),
-                        tooltip=tooltip_text,
-                    ).add_to(m)
+    # ------------------------------------------------------------------
+    # AOI outline & clipping
+    # ------------------------------------------------------------------
+    if aoi is not None:
+        m = aoi.explore(
+            m=m,
+            color="blue",
+            fill=False,
+            style_kwds={"weight": 4, "dashArray": "5,5", "opacity": 1.0},
+        )
+
+        gdfs = [g[g.intersects(aoi.union_all())] for g in gdfs]
+        if pois:
+            pois = [p[p.intersects(aoi.union_all())] for p in pois]
 
     return m
