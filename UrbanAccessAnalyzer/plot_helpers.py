@@ -2,7 +2,7 @@ import folium
 import pandas as pd
 import geopandas as gpd
 from typing import Optional, List, Union
-import matplotlib.cm as cm
+from matplotlib import colors, colormaps as mpl_colormaps
 import matplotlib.colors as colors
 from folium.plugins import BeautifyIcon
 import numpy as np 
@@ -308,35 +308,72 @@ def general_map(
                     )
 
             if not points.empty:
+                # Determine if theming is active
                 thematic = is_thematic(points, poi_column, poi_cmap)
 
-                # If categorical, build a color mapping
+                # Handle categorical color mapping
+                color_map = {}
                 if thematic and points[poi_column].dtype == "object":
                     categories = points[poi_column].unique()
-                    color_map = {cat: colors.to_hex(cm.get_cmap(poi_cmap)(i / len(categories)))
-                                for i, cat in enumerate(categories)}
+                    cmap = mpl_colormaps[poi_cmap]
+                    color_map = {
+                        cat: colors.to_hex(cmap(i / len(categories))) for i, cat in enumerate(categories)
+                    }
 
-                for _, row in points.iterrows():
+                # Prepare colormap for numeric data if needed
+                elif thematic:
+                    cmap = mpl_colormaps[poi_cmap]
+                    norm = colors.Normalize(vmin=poi_vmin, vmax=poi_vmax)
+
+                # Compute colors safely
+                def compute_color(row):
                     if thematic:
                         if points[poi_column].dtype == "object":
-                            color = color_map[row[poi_column]]  # categorical
+                            color_val = color_map.get(row[poi_column], "#000000")
                         else:
-                            # numeric
-                            norm = colors.Normalize(vmin=poi_vmin, vmax=poi_vmax)
-                            color = colors.to_hex(cm.get_cmap(poi_cmap)(norm(row[poi_column])))
+                            color_val = colors.to_hex(cmap(norm(row[poi_column])))
                     else:
-                        color = poi_color
+                        color_val = poi_color
+                    return str(color_val) if color_val else "#000000"
 
+                # Assign colors to _color column
+                points["_color"] = points.apply(compute_color, axis=1).astype(str)
+
+                # Convert to EPSG:4326 for Folium
+                points_geojson = points.to_crs(4326).copy()
+
+                # Keep only JSON-serializable columns + _color + geometry
+                serializable_cols = [
+                    c for c in points_geojson.columns
+                    if c != points_geojson.geometry.name
+                    and points_geojson[c].apply(lambda x: isinstance(x, (str, int, float, type(None)))).all()
+                ]
+                points_geojson = points_geojson[serializable_cols + [points_geojson.geometry.name]]
+
+                # GeoJson layer for polygons or data preview
+                folium.GeoJson(
+                    points_geojson.__geo_interface__,
+                    tooltip=folium.GeoJsonTooltip(
+                        fields=[c for c in serializable_cols],
+                        aliases=[f"{c}:" for c in serializable_cols],
+                        sticky=True,
+                        labels=True,
+                    ),
+                ).add_to(m)
+
+                # Add proper Markers using BeautifyIcon
+                for _, row in points_geojson.iterrows():
+                    tooltip_text = "<br>".join(f"{c}: {row[c]}" for c in serializable_cols if c != "_color")
                     folium.Marker(
-                        [row.geometry.y, row.geometry.x],
+                        location=[row.geometry.y, row.geometry.x],
                         icon=BeautifyIcon(
                             icon="circle",
                             icon_shape="marker",
-                            background_color=color,
+                            background_color=row["_color"],
                             border_color="black",
                             text_color="white",
                         ),
+                        tooltip=tooltip_text,
                     ).add_to(m)
-
 
     return m

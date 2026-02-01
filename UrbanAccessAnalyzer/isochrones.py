@@ -17,6 +17,19 @@ Or maybe it is right and the distance_matrix is the reason. This happened with t
 TODO: Add source node_id to the accessibility info. 
 """
 
+def __format_quality(v):
+    # Missing values
+    if pd.isna(v):
+        return None
+
+    # Numeric (int, float, numeric string)
+    try:
+        return f"{round(float(v), 3):.3f}"
+    except (TypeError, ValueError):
+        # Non-numeric strings like "bad_value"
+        return str(v)
+
+
 def default_distance_matrix(
     poi,
     distance_steps,
@@ -102,30 +115,18 @@ def __distance_matrix_to_processing_order(distance_matrix, accessibility_values=
         accessibility_values = distance_matrix.drop(columns=["service_quality"]).to_numpy()
         accessibility_values = np.unique(accessibility_values)[::-1].tolist()
 
-    accessibility_values = [f"{round(float(v), 3):.3f}" 
-                        if isinstance(v, (float, np.floating, int)) 
-                        else None if v in [None, 'nan', 'None', pd.NA] 
-                        else str(v)
-                        for v in accessibility_values]
+    accessibility_values = [__format_quality(v) for v in accessibility_values]
 
-    distance_matrix["service_quality"] = distance_matrix["service_quality"].apply(
-        lambda v: f"{round(float(v), 3):.3f}" 
-                if isinstance(v, (float, np.floating, int)) 
-                else None 
-                if v in [None, 'nan', 'None', pd.NA] 
-                else str(v)
+    distance_matrix["service_quality"] = distance_matrix["service_quality"].map(
+        __format_quality
     )
     # Melt the dataframe to long format for easier processing
     melted = distance_matrix.melt(
         id_vars="service_quality", var_name="distance", value_name="accessibility_value"
     )
     melted["distance"] = melted["distance"].astype(float)
-    melted["accessibility_value"] = melted["accessibility_value"].apply(
-        lambda v: f"{round(float(v), 3):.3f}" 
-                if isinstance(v, (float, np.floating, int)) 
-                else None 
-                if v in [None, 'nan', 'None', pd.NA] 
-                else str(v)
+    melted["accessibility_value"] = melted["accessibility_value"].map(
+        __format_quality
     )
 
 
@@ -154,12 +155,8 @@ def __compute_isochrones(G, points, process_order_df, service_quality_col=None, 
         points["__service_quality"] = 1
         service_quality_col = "__service_quality"
 
-    points[service_quality_col] = points[service_quality_col].apply(
-        lambda v: f"{round(float(v), 3):.3f}" 
-                if isinstance(v, (float, np.floating, int)) 
-                else None 
-                if v in [None, 'nan', 'None', pd.NA] 
-                else str(v)
+    points[service_quality_col] = points[service_quality_col].map(
+        __format_quality
     )
 
     for quality, distance, accessibility in tqdm(
@@ -600,35 +597,18 @@ def graph(
     H = __exact_isochrones(
         H, process_order_df=process_order_df, min_edge_length=min_edge_length
     )
-    def _clean(series: pd.Series) -> pd.Series:
-        # Step 1: Replace common "null" representations with actual None
-        series = series.replace({"nan": None, "None": None, np.nan: None, pd.NA: None})
-        
-        # Step 2: Ensure actual NaNs are replaced with None
-        series = series.where(series.notna(), None)
-        
-        # Step 3: Try to infer numeric types if possible
-        def try_convert(val):
-            if val is None:
-                return None
-            try:
-                # Try converting to float first
-                fval = float(val)
-                # If integer-like, convert to int
-                if fval.is_integer():
-                    return int(fval)
-                return fval
-            except (ValueError, TypeError):
-                # If it cannot be converted, keep as original
-                return val
-        
-        series = series.map(try_convert)
-        
-        return series
     
     nodes_gdf, edges_gdf = ox.graph_to_gdfs(H)
-    nodes_gdf["accessibility"] = _clean(nodes_gdf["accessibility"])
-    edges_gdf["accessibility"] = _clean(edges_gdf["accessibility"])
+    try:
+        nodes_gdf["accessibility"] = nodes_gdf["accessibility"].astype(float)
+    except:
+        None
+
+    try:
+        edges_gdf["accessibility"] = edges_gdf["accessibility"].astype(float)
+    except:
+        None 
+    
     H = ox.graph_from_gdfs(nodes_gdf, edges_gdf, graph_attrs=H.graph)
     if return_points:
         return H, points
@@ -648,12 +628,8 @@ def buffers(
         service_geoms["__service_quality"] = 1
         service_quality_col = "__service_quality"
 
-    service_geoms[service_quality_col] = service_geoms[service_quality_col].apply(
-        lambda v: f"{round(float(v), 3):.3f}" 
-                if isinstance(v, (float, np.floating, int)) 
-                else None 
-                if v in [None, 'nan', 'None', pd.NA] 
-                else str(v)
+    service_geoms[service_quality_col] = service_geoms[service_quality_col].map(
+        __format_quality
     )
 
     process_order_df = __distance_matrix_to_processing_order(
@@ -697,32 +673,9 @@ def buffers(
 
     result = gpd.GeoDataFrame(rows, crs=service_geoms.crs)
     result = result.sort_values("accessibility_int")
-    def _clean(series: pd.Series) -> pd.Series:
-        # Step 1: Replace common "null" representations with actual None
-        series = series.replace({"nan": None, "None": None, np.nan: None, pd.NA: None})
-        
-        # Step 2: Ensure actual NaNs are replaced with None
-        series = series.where(series.notna(), None)
-        
-        # Step 3: Try to infer numeric types if possible
-        def try_convert(val):
-            if val is None:
-                return None
-            try:
-                # Try converting to float first
-                fval = float(val)
-                # If integer-like, convert to int
-                if fval.is_integer():
-                    return int(fval)
-                return fval
-            except (ValueError, TypeError):
-                # If it cannot be converted, keep as original
-                return val
-        
-        series = series.map(try_convert)
-        
-        return series
     
-    result['accessibility'] = _clean(result["accessibility"])
+    result['accessibility'] = result["accessibility"].map(
+        __format_quality
+    )
     return result
 
