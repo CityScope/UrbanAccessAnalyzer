@@ -72,6 +72,12 @@ def general_map(
     if len(gdfs) == 0 and len(pois) == 0:
         raise ValueError("Nothing to map")
     
+    if aoi is not None:
+        if len(pois) > 0:
+            pois = [p[p.intersects(aoi.union_all())] for p in pois]
+        if len(gdfs) > 0:
+            gdfs = [g[g.intersects(aoi.union_all())] for g in gdfs]
+                
     # ------------------------------------------------------------------
     # Map centering
     # ------------------------------------------------------------------
@@ -85,7 +91,7 @@ def general_map(
     if m is None:
         m = folium.Map(
             location=[centroid.y, centroid.x],
-            zoom_start=12,
+            zoom_start=11,
             tiles="CartoDB positron",
         )
 

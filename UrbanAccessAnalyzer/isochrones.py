@@ -166,9 +166,10 @@ def __compute_isochrones(G, points, process_order_df, service_quality_col=None, 
         total=len(process_order_df),
         disable=not verbose,
     ):
-        if isinstance(quality, int):
+        if not isinstance(quality, list):
             quality = [quality]
-            
+    
+        quality = [__format_quality(q) for q in quality]
         node_ids = list(
             points.loc[points[service_quality_col].isin(quality), "osmid"]
             .dropna()
