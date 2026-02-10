@@ -125,14 +125,14 @@ def quality_by_area(gdf: gpd.GeoDataFrame | gpd.GeoSeries, area_steps: list[floa
     for i in range(len(area_steps)):
         j = len(area_steps) - i - 1
         if large_is_better:
-            gdf.loc[gdf.geometry.area > area_steps[i], '_service_quality'] = j + 1
+            gdf.loc[gdf.geometry.area > area_steps[i], '_poi_quality'] = j + 1
         else:
-            gdf.loc[gdf.geometry.area > area_steps[j], '_service_quality'] = i + 1
+            gdf.loc[gdf.geometry.area > area_steps[j], '_poi_quality'] = i + 1
             
-    gdf['_service_quality'] = list(gdf['_service_quality'].max() + 1 - gdf['_service_quality'])
-    gdf['_service_quality'] = list(gdf['_service_quality'] / gdf['_service_quality'].max())
-    gdf['_service_quality'] = gdf['_service_quality'].round(3)
-    return list(gdf['_service_quality'])
+    gdf['_poi_quality'] = list(gdf['_poi_quality'].max() + 1 - gdf['_poi_quality'])
+    gdf['_poi_quality'] = list(gdf['_poi_quality'] / gdf['_poi_quality'].max())
+    gdf['_poi_quality'] = gdf['_poi_quality'].round(3)
+    return list(gdf['_poi_quality'])
 
 
 def polygons_to_points(poi, street_edges):

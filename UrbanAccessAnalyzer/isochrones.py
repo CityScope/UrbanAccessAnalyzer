@@ -33,32 +33,32 @@ def __format_quality(v):
 def default_distance_matrix(
     poi,
     distance_steps,
-    service_quality_column="service_quality"
+    poi_quality_column="poi_quality"
 ):
     """
-    Create a diagonal-like distance vs service_quality DataFrame with
+    Create a diagonal-like distance vs poi_quality DataFrame with
     accessibility values in the range [0, 1], rounded to 3 decimals.
 
-    Always includes service_quality = 0 with accessibility = 0.
+    Always includes poi_quality = 0 with accessibility = 0.
     """
 
     # Unique service quality levels
-    service_quality = poi[service_quality_column].dropna().unique()
+    poi_quality = poi[poi_quality_column].dropna().unique()
 
     # Always include 0
-    service_quality = np.unique(np.append(service_quality, 0.0))
+    poi_quality = np.unique(np.append(poi_quality, 0.0))
 
     # Sort best → worst
-    service_quality = np.sort(service_quality)[::-1]
+    poi_quality = np.sort(poi_quality)[::-1]
 
-    n_sq = len(service_quality)
+    n_sq = len(poi_quality)
     n_dist = len(distance_steps)
 
     max_idx = n_sq + n_dist - 2
 
-    df = pd.DataFrame(index=service_quality, columns=distance_steps, dtype=float)
+    df = pd.DataFrame(index=poi_quality, columns=distance_steps, dtype=float)
 
-    for i, sq in enumerate(service_quality):
+    for i, sq in enumerate(poi_quality):
         for j, dist in enumerate(distance_steps):
 
             if sq == 0:
@@ -76,7 +76,7 @@ def default_distance_matrix(
         df.stack().unique(), reverse=True
     )
 
-    df[service_quality_column] = df.index
+    df[poi_quality_column] = df.index
     df = df.reset_index(drop=True)
 
     return df, accessibility_values
@@ -97,7 +97,7 @@ def __distance_matrix_to_processing_order(distance_matrix, accessibility_values=
             {
                 "accessibility_int": range(1, len(distances) + 1),
                 "distance": distances,
-                "service_quality": 1,
+                "poi_quality": 1,
                 "accessibility_value": labels,
             }
         )
@@ -108,21 +108,21 @@ def __distance_matrix_to_processing_order(distance_matrix, accessibility_values=
         )
         return process_order_df
 
-    if "service_quality" not in distance_matrix:
-        raise Exception("Column service_quality should always exist in distance_matrix")
+    if "poi_quality" not in distance_matrix:
+        raise Exception("Column poi_quality should always exist in distance_matrix")
 
     if accessibility_values is None:
-        accessibility_values = distance_matrix.drop(columns=["service_quality"]).to_numpy()
+        accessibility_values = distance_matrix.drop(columns=["poi_quality"]).to_numpy()
         accessibility_values = np.unique(accessibility_values)[::-1].tolist()
 
     accessibility_values = [__format_quality(v) for v in accessibility_values]
 
-    distance_matrix["service_quality"] = distance_matrix["service_quality"].map(
+    distance_matrix["poi_quality"] = distance_matrix["poi_quality"].map(
         __format_quality
     )
     # Melt the dataframe to long format for easier processing
     melted = distance_matrix.melt(
-        id_vars="service_quality", var_name="distance", value_name="accessibility_value"
+        id_vars="poi_quality", var_name="distance", value_name="accessibility_value"
     )
     melted["distance"] = melted["distance"].astype(float)
     melted["accessibility_value"] = melted["accessibility_value"].map(
@@ -130,9 +130,9 @@ def __distance_matrix_to_processing_order(distance_matrix, accessibility_values=
     )
 
 
-    # For each service_quality and value, find the max distance
+    # For each poi_quality and value, find the max distance
     process_order_df = (
-        melted.groupby(["service_quality", "accessibility_value"])["distance"].max().reset_index()
+        melted.groupby(["poi_quality", "accessibility_value"])["distance"].max().reset_index()
     )
     process_order_df["accessibility_int"] = process_order_df["accessibility_value"].replace(
         {accessibility_values[i]: str(i) for i in range(len(accessibility_values))}
@@ -140,7 +140,7 @@ def __distance_matrix_to_processing_order(distance_matrix, accessibility_values=
     process_order_df["accessibility_int"] = process_order_df["accessibility_int"].astype(int)
     process_order_df = (
         process_order_df.groupby(["accessibility_int", "distance"])
-        .agg({"service_quality": list, "accessibility_value": "first"})
+        .agg({"poi_quality": list, "accessibility_value": "first"})
         .reset_index()
     )
     process_order_df = process_order_df.sort_values(
@@ -149,18 +149,18 @@ def __distance_matrix_to_processing_order(distance_matrix, accessibility_values=
     return process_order_df
 
 
-def __compute_isochrones(G, points, process_order_df, service_quality_col=None, verbose:bool=True):
+def __compute_isochrones(G, points, process_order_df, poi_quality_col=None, verbose:bool=True):
     H = G.copy()
-    if service_quality_col is None:
-        points["__service_quality"] = 1
-        service_quality_col = "__service_quality"
+    if poi_quality_col is None:
+        points["__poi_quality"] = 1
+        poi_quality_col = "__poi_quality"
 
-    points[service_quality_col] = points[service_quality_col].map(
+    points[poi_quality_col] = points[poi_quality_col].map(
         __format_quality
     )
 
     for quality, distance, accessibility in tqdm(
-        process_order_df[["service_quality", "distance", "accessibility_value"]].itertuples(
+        process_order_df[["poi_quality", "distance", "accessibility_value"]].itertuples(
             index=False, name=None
         ),
         total=len(process_order_df),
@@ -171,7 +171,7 @@ def __compute_isochrones(G, points, process_order_df, service_quality_col=None, 
     
         quality = [__format_quality(q) for q in quality]
         node_ids = list(
-            points.loc[points[service_quality_col].isin(quality), "osmid"]
+            points.loc[points[poi_quality_col].isin(quality), "osmid"]
             .dropna()
             .astype(int)
         )
@@ -555,16 +555,16 @@ def graph(
     G,
     points,
     distance_matrix,
-    service_quality_col=None,
+    poi_quality_col=None,
     accessibility_values=None,
     min_edge_length=0,
     max_dist=None,
     verbose:bool=True
 ):
     points = points.copy()
-    if service_quality_col is None:
-        points['_service_quality_col'] = 1 
-        service_quality_col = '_service_quality_col'
+    if poi_quality_col is None:
+        points['_poi_quality_col'] = 1 
+        poi_quality_col = '_poi_quality_col'
         
     return_points = False
 
@@ -584,9 +584,9 @@ def graph(
         warnings.warn("Points are too far away from edges. No isochrones returned.", UserWarning)
         return G
 
-    if isinstance(distance_matrix,pd.DataFrame) and service_quality_col is not None:
-        if service_quality_col in distance_matrix.columns and 'service_quality' not in distance_matrix.columns:
-            distance_matrix = distance_matrix.rename(columns={service_quality_col:'service_quality'})
+    if isinstance(distance_matrix,pd.DataFrame) and poi_quality_col is not None:
+        if poi_quality_col in distance_matrix.columns and 'poi_quality' not in distance_matrix.columns:
+            distance_matrix = distance_matrix.rename(columns={poi_quality_col:'poi_quality'})
 
     process_order_df = __distance_matrix_to_processing_order(
         distance_matrix=distance_matrix, accessibility_values=accessibility_values
@@ -595,7 +595,7 @@ def graph(
         H,
         points=points,
         process_order_df=process_order_df,
-        service_quality_col=service_quality_col,
+        poi_quality_col=poi_quality_col,
         verbose=verbose
     )
 
@@ -623,23 +623,23 @@ def graph(
 
 
 def buffers(
-    service_geoms, distance_matrix, accessibility_values, service_quality_col, verbose:bool=True
+    service_geoms, distance_matrix, accessibility_values, poi_quality_col, verbose:bool=True
 ):
     service_geoms = service_geoms.copy()
     if service_geoms.crs.is_geographic:
         service_geoms = service_geoms.to_crs(service_geoms.estimate_utm_crs())
 
-    if service_quality_col is None:
-        service_geoms["__service_quality"] = 1
-        service_quality_col = "__service_quality"
+    if poi_quality_col is None:
+        service_geoms["__poi_quality"] = 1
+        poi_quality_col = "__poi_quality"
 
-    service_geoms[service_quality_col] = service_geoms[service_quality_col].map(
+    service_geoms[poi_quality_col] = service_geoms[poi_quality_col].map(
         __format_quality
     )
 
-    if isinstance(distance_matrix,pd.DataFrame) and service_quality_col is not None:
-        if service_quality_col in distance_matrix.columns and 'service_quality' not in distance_matrix.columns:
-            distance_matrix = distance_matrix.rename(columns={service_quality_col:'service_quality'})
+    if isinstance(distance_matrix,pd.DataFrame) and poi_quality_col is not None:
+        if poi_quality_col in distance_matrix.columns and 'poi_quality' not in distance_matrix.columns:
+            distance_matrix = distance_matrix.rename(columns={poi_quality_col:'poi_quality'})
 
     process_order_df = __distance_matrix_to_processing_order(
         distance_matrix=distance_matrix, accessibility_values=accessibility_values
@@ -651,7 +651,7 @@ def buffers(
         a:[] for a in accessibility_values_list
     }
     for quality, distance, accessibility in tqdm(
-        process_order_df[["service_quality", "distance", "accessibility_value"]].itertuples(
+        process_order_df[["poi_quality", "distance", "accessibility_value"]].itertuples(
             index=False, name=None
         ),
         total=len(process_order_df),
@@ -660,7 +660,7 @@ def buffers(
         if isinstance(quality, int):
             quality = [quality]
 
-        selected_points = service_geoms[service_geoms[service_quality_col].isin(quality)]
+        selected_points = service_geoms[service_geoms[poi_quality_col].isin(quality)]
         selected_points = selected_points.geometry.union_all().buffer(distance,resolution=4)
         buffers[accessibility].append(selected_points)
 
