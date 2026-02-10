@@ -1,6 +1,7 @@
 [project]
 name = "UrbanAccessAnalyzer"
-version = "0.1.0"
+version = "1.0.0"
+author = "Miguel Ureña Pliego"
 description = "Use graphs and OSM data to compute isochrones and accessibility to services"
 readme = "README.md"
 requires-python = ">=3.9"
