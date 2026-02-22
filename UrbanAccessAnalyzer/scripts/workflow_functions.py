@@ -136,7 +136,7 @@ def worldpop_to_h3_accessibility(
     population_file = population.download_worldpop_population(
         aoi,
         year,
-        folder=worlpop_path,
+        folder=configs.WORLDPOP_PATH,
         resolution=resolution,
         dataset=dataset,
         subset=subset,
