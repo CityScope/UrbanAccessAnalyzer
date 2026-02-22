@@ -6,7 +6,9 @@ import networkx as nx
 from shapely.geometry import Point
 import numpy as np
 from sklearn.cluster import AgglomerativeClustering
-
+from . import osm 
+from . import configs 
+import os 
 import warnings
 
 "TODO: Compute length in polars"
@@ -1038,7 +1040,7 @@ def __multi_ego_graph(
     """
     if undirected:
         if isinstance(weight, str):
-            sp, _ = nx.multi_source_dijkstra(
+            sp = nx.multi_source_dijkstra_path_length(
                 G.to_undirected(), n, cutoff=radius, weight=weight
             )
         else:
@@ -1049,7 +1051,7 @@ def __multi_ego_graph(
             )
     else:
         if isinstance(weight, str):
-            sp, _ = nx.multi_source_dijkstra(G, n, cutoff=radius, weight=weight)
+            sp = nx.multi_source_dijkstra_path_length(G, n, cutoff=radius, weight=weight)
         else:
             sp = dict(nx.multi_source_dijkstra_path_length(G, n, cutoff=radius))
 
@@ -1066,8 +1068,8 @@ def __multi_ego_graph(
 
 def crop_graph_by_iso_nodes(
     G=None,
-    node_ids=[],
-    border_node_ids=[],
+    node_ids=None,
+    border_node_ids=None,
     min_edge_length: float = 0,
     undirected: bool = False,
     outbound: bool = True,
@@ -1075,6 +1077,10 @@ def crop_graph_by_iso_nodes(
     edges_gdf=None,
     graph_attrs=None,
 ):
+    if node_ids is None:
+        node_ids = []
+    if border_node_ids is none:
+        border_node_ids = []
     if G is None:
         if (nodes_gdf is None) or (edges_gdf is None) or (graph_attrs is None):
             raise Exception("Eather provide G or nodes_gdf, edges_gdf and graph_attrs")
@@ -1443,3 +1449,44 @@ def isochrone(
 #     result['ls_id'] = result['ls'].replace({level_of_services[i] : str(i) for i in range(len(level_of_services))})
 #     result = result.sort_values(['ls_id','stop_quality'])
 #     return result
+
+
+def download_and_create_graph(osm_xml_path,pbf_path=configs.PBF_OSM_PATH,aoi=None,network_filter=None,min_edge_length=0):
+    if not os.path.isfile(osm_xml_path):
+        if pbf_path is None:
+            raise Exception("You have to provide a 'pbf_path' to donwload pbf street networks and create a xml graph.")
+        if aoi is None:
+            raise Exception("You have to provide an area of interest 'aoi' to donwload pbf street networks and create a xml graph.")
+        
+        # WARNING: Execute only if osmium is installed
+        # Select what type of street network you want to load
+        if network_filter is not None:
+            network_filter = osm.osmium_network_filter(network_filter)
+
+        # Download the region pbf file crop it by aoi and convert to osm format
+        osm.geofabrik_to_osm(
+            osm_xml_path,
+            input_file=pbf_path,
+            aoi=aoi,
+            osmium_filter_args=network_filter,
+            overwrite=False
+        )
+
+    # Load
+    G = ox.graph_from_xml(osm_xml_path)
+    if aoi is not None:
+        nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
+        nodes_gdf = nodes_gdf.to_crs(aoi.crs)
+        edges_gdf = edges_gdf.to_crs(aoi.crs)
+        nodes_gdf = nodes_gdf[nodes_gdf.geometry.intersects(aoi.union_all())]
+        edges_gdf = edges_gdf[edges_gdf.geometry.intersects(aoi.union_all())]
+        G = ox.graph_from_gdfs(nodes_gdf,edges_gdf)
+        # Project geometry coordinates to UTM system to allow euclidean meassurements in meters (sorry americans)
+        G = ox.project_graph(G,to_crs=aoi.estimate_utm_crs())
+    else:
+        G = ox.project_graph(G)
+
+    if min_edge_length > 0:
+        G = simplify_graph(G,min_edge_length=min_edge_length,min_edge_separation=min_edge_length*2,undirected=True)
+
+    return G 

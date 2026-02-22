@@ -12,8 +12,8 @@ from . import h3_utils
 def general_map(
     m: Optional[folium.Map] = None,
     aoi: Optional[gpd.GeoDataFrame] = None,
-    pois: Optional[Union[gpd.GeoDataFrame, List[gpd.GeoDataFrame]]] = [],
-    gdfs: Optional[Union[gpd.GeoDataFrame, pd.DataFrame, List[Union[gpd.GeoDataFrame, pd.DataFrame]]]] = [],
+    pois: Optional[Union[gpd.GeoDataFrame, List[gpd.GeoDataFrame]]] = None,
+    gdfs: Optional[Union[gpd.GeoDataFrame, pd.DataFrame, List[Union[gpd.GeoDataFrame, pd.DataFrame]]]] = None,
     poi_column: Optional[str] = None,
     poi_color: Optional[str] = None,
     poi_cmap: Optional[str] = None,
@@ -27,6 +27,7 @@ def general_map(
     vmax: Optional[float] = None,
     opacity: float = 0.4,
     size_column: Optional[str] = None,
+    zoom_start=11,
 ) -> folium.Map:
     """
     General-purpose interactive Folium map builder.
@@ -37,7 +38,10 @@ def general_map(
     - Optional thematic coloring
     - Optional point-size scaling
     """
-
+    if pois is None:
+        pois = []
+    if gdfs is None:
+        gdfs = []
     # ------------------------------------------------------------------
     # CRS normalization
     # ------------------------------------------------------------------
@@ -69,15 +73,9 @@ def general_map(
         pois = [pois]
     pois = _normalize_gdfs(pois)
 
-    if len(gdfs) == 0 and len(pois) == 0:
+    if len(gdfs) == 0 and len(pois) == 0 and (aoi is None):
         raise ValueError("Nothing to map")
     
-    if aoi is not None:
-        if len(pois) > 0:
-            pois = [p[p.intersects(aoi.union_all())] for p in pois]
-        if len(gdfs) > 0:
-            gdfs = [g[g.intersects(aoi.union_all())] for g in gdfs]
-                
     # ------------------------------------------------------------------
     # Map centering
     # ------------------------------------------------------------------
@@ -91,7 +89,33 @@ def general_map(
     if m is None:
         m = folium.Map(
             location=[centroid.y, centroid.x],
-            zoom_start=11,
+            zoom_start=zoom_start,
+            tiles="CartoDB positron",
+        )
+
+    if aoi is not None:
+        if m is None:
+            m = aoi.explore(
+                color="blue",
+                fill=False,
+                style_kwds={"weight": 4, "dashArray": "5,5", "opacity": 1.0},
+            )
+        else:
+            m = aoi.explore(
+                m=m,
+                color="blue",
+                fill=False,
+                style_kwds={"weight": 4, "dashArray": "5,5", "opacity": 1.0},
+            )
+
+        if len(pois) > 0:
+            pois = [p[p.intersects(aoi.union_all())] for p in pois]
+        if len(gdfs) > 0:
+            gdfs = [g[g.intersects(aoi.union_all())] for g in gdfs]
+    else:
+        m = folium.Map(
+            location=[centroid.y, centroid.x],
+            zoom_start=12,
             tiles="CartoDB positron",
         )
 
@@ -387,9 +411,5 @@ def general_map(
             fill=False,
             style_kwds={"weight": 4, "dashArray": "5,5", "opacity": 1.0},
         )
-
-        gdfs = [g[g.intersects(aoi.union_all())] for g in gdfs]
-        if pois:
-            pois = [p[p.intersects(aoi.union_all())] for p in pois]
-
+        
     return m

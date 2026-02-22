@@ -30,3 +30,7 @@ examples/*/
 
 # Exclude files that start with "local" (both .py and .ipynb or any extension)
 examples/local*
+
+api_keys.py
+
+presentation/

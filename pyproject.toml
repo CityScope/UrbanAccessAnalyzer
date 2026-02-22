@@ -53,6 +53,12 @@ plot = [
     "streamlit>=1.50.0",
 ]
 
+# Census data 
+census = [
+    "us>=3.2.0",
+    "pygris>=0.2.1",
+]
+
 # Optional extras for development or docs
 dev = [
     "pre-commit>=4.2.0",

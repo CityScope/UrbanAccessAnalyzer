@@ -407,7 +407,9 @@ def overpass_api_query(query: str, bounds: gpd.GeoDataFrame | gpd.GeoSeries):
         drop=True
     )
     gdf = gdf.loc[:, ~gdf.columns.duplicated()]
-    return gdf.to_crs(bounds.crs)
+    gdf = gdf.to_crs(bounds.crs)
+    gdf = gdf[gdf.geometry.intersects(bounds.union_all())]
+    return gdf
 
 
 def green_areas(bounds, intersected_geom=None, min_area=200, min_width=10, buffer=5):
@@ -469,3 +471,80 @@ def bus_stops(bounds):
     """
     stops = overpass_api_query(query, bounds)
     return stops.to_crs(bounds.crs)
+
+def schools(bounds):
+    query = """
+        [out:xml] [timeout:25];
+        (
+            node["amenity"="school"]({{bbox}});
+            way["amenity"="school"]({{bbox}});
+            relation["amenity"="school"]({{bbox}});
+        );
+        (._;>;);
+        out body;
+    """
+    pois = overpass_api_query(query, bounds)
+    return pois.to_crs(bounds.crs)
+
+def healthcare(bounds):
+    query = """
+        [out:xml] [timeout:25];
+        (
+            node["amenity"~"hospital|clinic|doctors|healthcare"]({{bbox}});
+            way["amenity"~"hospital|clinic|doctors|healthcare"]({{bbox}});
+            relation["amenity"~"hospital|clinic|doctors|healthcare"]({{bbox}});
+            
+            node["healthcare"]({{bbox}});
+            way["healthcare"]({{bbox}});
+            relation["healthcare"]({{bbox}});
+        );
+        (._;>;);
+        out body;
+    """
+    pois = overpass_api_query(query, bounds)
+    return pois.to_crs(bounds.crs)
+
+def groceries(bounds):
+    query = """[out:xml][timeout:25];
+    (
+        node["shop"~"supermarket|grocery|convenience"]({{bbox}});
+        way["shop"~"supermarket|grocery|convenience"]({{bbox}});
+        relation["shop"~"supermarket|grocery|convenience"]({{bbox}});
+        
+        node["amenity"="marketplace"]({{bbox}});
+        way["amenity"="marketplace"]({{bbox}});
+        relation["amenity"="marketplace"]({{bbox}});
+    );
+    (._;>;);
+    out body;
+    """ 
+    pois = overpass_api_query(query, bounds)
+    return pois.to_crs(bounds.crs)
+
+
+def shops(bounds):
+    query = """[out:xml][timeout:25];
+        (
+            node["shop"]({{bbox}});
+            way["shop"]({{bbox}});
+            relation["shop"]({{bbox}});
+        );
+        (._;>;);
+        out body;
+    """
+    pois = overpass_api_query(query, bounds)
+    return pois.to_crs(bounds.crs)
+
+
+def restaurants(bounds):
+    query = """[out:xml][timeout:25];
+        (
+            node["amenity"~"restaurant|bar|pub|cafe|fast_food"]({{bbox}});
+            way["amenity"~"restaurant|bar|pub|cafe|fast_food"]({{bbox}});
+            relation["amenity"~"restaurant|bar|pub|cafe|fast_food"]({{bbox}});
+        );
+        (._;>;);
+        out body;
+    """
+    pois = overpass_api_query(query, bounds)
+    return pois.to_crs(bounds.crs)

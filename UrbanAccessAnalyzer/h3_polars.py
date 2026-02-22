@@ -218,8 +218,8 @@ def cells_in_geometry(
 
 def aggregate(
     h3_df: pl.DataFrame | pl.LazyFrame,
-    columns: List[str] = [],
-    value_order: Union[List, Dict[str, List]] = {},
+    columns: List[str] = None,
+    value_order: Union[List, Dict[str, List]] = None,
     method: Union[str, Dict[str, str]] = "max",
     h3_column: Optional[str] = 'h3_cell'
 ) -> pl.LazyFrame:
@@ -248,6 +248,12 @@ def aggregate(
     pandas.DataFrame
         DataFrame indexed by ``h3_cell`` with aggregated values.
     """
+    if value_order is None:
+        value_order = {}
+
+    if columns is None:
+        columns = []
+
     if h3_column is None:
         if "h3_cells" in h3_df.collect_schema().names():
             h3_column = "h3_cells" 
@@ -715,7 +721,21 @@ def from_raster(
 
     return df
 
-def resample(df,target_resolution,columns=[],value_order={},method='max',h3_column="h3_cell"):
+def resample(
+    df,
+    target_resolution,
+    columns: Optional[List[str]] = None,
+    value_order: Optional[Dict] = None,
+    method='max',
+    h3_column=None
+):
+    # --- protect against mutable defaults ---
+    if columns is None:
+        columns = []
+    if value_order is None:
+        value_order = {}
+    # --------------------------------------------
+
     if h3_column not in df.collect_schema().names():
         raise Exception(f"H3 cell column {h3_column} not in {df}")
 

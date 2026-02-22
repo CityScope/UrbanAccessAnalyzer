@@ -223,8 +223,8 @@ def cells_in_geometry(
 
 def aggregate(
     h3_df: gpd.GeoDataFrame | pd.DataFrame,
-    columns: List[str] = [],
-    value_order: Union[List, Dict[str, List]] = {},
+    columns: Optional[List[str]] = None,
+    value_order: Optional[Union[List, Dict[str, List]]] = None,
     method: Union[str, Dict[str, str]] = "max",
     h3_column: Optional[str] = None
 ) -> pd.DataFrame:
@@ -253,6 +253,13 @@ def aggregate(
     pandas.DataFrame
         DataFrame indexed by ``h3_cell`` with aggregated values.
     """
+
+    # --- protect against mutable defaults ---
+    if columns is None:
+        columns = []
+    if value_order is None:
+        value_order = {}
+    # --------------------------------------------
 
     h3_df = h3_df.copy()
 
@@ -676,7 +683,20 @@ def from_raster(
 
     return df
 
-def resample(df,target_resolution,columns=[],value_order={},method='max',h3_column=None):
+def resample(
+    df,
+    target_resolution,
+    columns: Optional[List[str]] = None,
+    value_order: Optional[Dict] = None,
+    method='max',
+    h3_column=None
+):
+    # --- protect against mutable defaults ---
+    if columns is None:
+        columns = []
+    if value_order is None:
+        value_order = {}
+
     if h3_column is None:
         h3_column = df.index.name
         df = df.reset_index()

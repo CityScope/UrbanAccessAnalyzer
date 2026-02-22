@@ -5,8 +5,9 @@ from rapidfuzz import process, fuzz
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 import geopandas as gpd
-from typing import List, Dict
+from typing import List, Dict, Union
 import osmnx as ox
+from shapely.geometry import Polygon, MultiPolygon, Point
 
 def get_city_geometry(city_name: str) -> gpd.GeoDataFrame:
     """
@@ -87,6 +88,67 @@ def get_geographic_suggestions_from_string(
         'subdivision_names': sorted(suggested_subdivision_names),
         'municipalities': sorted(suggested_municipalities),
     }
+
+def get_geographic_suggestions_from_aoi(
+    aoi: Union[Polygon, MultiPolygon, gpd.GeoDataFrame, gpd.GeoSeries],
+    num_points: int = 1,
+    user_agent: str = "MobilityDatabaseClient"
+) -> Dict[str, List[str]]:
+    """Reverse-geocode AOI geometry to suggest country, subdivision, and municipality."""
+    import random
+
+    if isinstance(aoi, (gpd.GeoDataFrame, gpd.GeoSeries)):
+        if aoi.empty:
+            raise ValueError("GeoDataFrame/GeoSeries is empty.")
+        target_geometry = aoi.to_crs(4326).unary_union
+    elif isinstance(aoi, (Polygon, MultiPolygon)):
+        target_geometry = aoi
+    else:
+        raise TypeError("AOI must be Polygon, MultiPolygon, GeoDataFrame, or GeoSeries.")
+
+    if target_geometry.is_empty:
+        raise ValueError("AOI geometry is empty.")
+
+    geolocator = Nominatim(user_agent=user_agent, timeout=10)
+    suggested_country_codes = set()
+    suggested_subdivision_names = set()
+    suggested_municipalities = set()
+
+    points_to_geocode: List[Point] = []
+    min_lon, min_lat, max_lon, max_lat = target_geometry.bounds
+
+    if num_points <= 0:
+        num_points = 1
+    if num_points == 1:
+        points_to_geocode.append(target_geometry.representative_point())
+    else:
+        for _ in range(num_points):
+            points_to_geocode.append(Point(random.uniform(min_lon, max_lon), random.uniform(min_lat, max_lat)))
+
+    for i, point in enumerate(points_to_geocode):
+        lat, lon = point.y, point.x
+        print(f"Reverse geocoding point {i+1}/{len(points_to_geocode)}: ({lat}, {lon})")
+        try:
+            location = geolocator.reverse((lat, lon), language='en')
+            if location and location.raw:
+                address = location.raw.get('address', {})
+                if cc := address.get('country_code'):
+                    suggested_country_codes.add(cc.upper())
+                if subdivision := address.get('state') or address.get('province') or address.get('region') or address.get('county'):
+                    suggested_subdivision_names.add(subdivision)
+                if municipality := address.get('city') or address.get('town') or address.get('village'):
+                    suggested_municipalities.add(municipality)
+        except (GeocoderTimedOut, GeocoderServiceError) as e:
+            print(f"Geocoding failed for point ({lat}, {lon}): {e}")
+        except Exception as e:
+            print(f"Unexpected error for point ({lat}, {lon}): {e}")
+
+    return {
+        'country_codes': sorted(list(suggested_country_codes)),
+        'subdivision_names': sorted(list(suggested_subdivision_names)),
+        'municipalities': sorted(list(suggested_municipalities))
+    }
+
 
 def get_folder(path: str) -> str | None:
     """

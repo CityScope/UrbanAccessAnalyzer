@@ -9,6 +9,7 @@ import string
 from itertools import repeat
 from tqdm import tqdm
 import warnings
+from typing import Literal 
 
 """
 TODO: There is still a bug in the LoS graph and sometimes the values seem 
@@ -559,7 +560,8 @@ def graph(
     accessibility_values=None,
     min_edge_length=0,
     max_dist=None,
-    verbose:bool=True
+    verbose:bool=True, 
+    return_as_gdfs:bool=False
 ):
     points = points.copy()
     if poi_quality_col is None:
@@ -613,6 +615,9 @@ def graph(
         edges_gdf["accessibility"] = edges_gdf["accessibility"].astype(float)
     except:
         None 
+    
+    if return_as_gdfs:
+        return nodes_gdf, edges_gdf 
     
     H = ox.graph_from_gdfs(nodes_gdf, edges_gdf, graph_attrs=H.graph)
     if return_points:
@@ -688,3 +693,136 @@ def buffers(
     )
     return result
 
+
+def cell_cluster(gdf, distance, bbox=None):
+    # Reproject if geographic (lat/lon)
+    if gdf.crs.is_geographic:
+        gdf = gdf.to_crs(gdf.estimate_utm_crs())
+
+    # Extract x and y coordinates (assuming Point geometries)
+    gdf["x"] = gdf.geometry.x
+    gdf["y"] = gdf.geometry.y
+
+    if bbox:
+        minx, miny, maxx, maxy = bbox
+    else:
+        minx, miny, maxx, maxy = gdf.total_bounds
+
+    # Shift coordinates so grid starts at (minx, miny)
+    gdf["cell_id_x"] = np.floor((gdf["x"] - minx) / distance).astype(int)
+    gdf["cell_id_y"] = np.floor((gdf["y"] - miny) / distance).astype(int)
+
+    # Combine into single cell id
+    gdf["cell_id"] = (
+        gdf["cell_id_x"].astype(str) + "_" +
+        gdf["cell_id_y"].astype(str)
+    )
+
+    return gdf
+
+
+def graph_with_origin_id(pois, distance_grid, G=None, poi_id="osmid", min_edge_length=0, max_dist=None, verbose=True):
+    if G is not None:
+        G = G.copy()
+
+    # ----------------------------
+    # Columns handling
+    # ----------------------------
+    if columns is None:
+        columns = [c for c in pois.columns if c != pois.geometry.name]
+
+    # ----------------------------
+    # Reproject if needed
+    # ----------------------------
+    if pois.crs.is_geographic:
+        pois = pois.to_crs(pois.estimate_utm_crs())
+
+    bbox = pois.total_bounds
+
+    if "osmid" not in pois.columns:
+        G, osmids = graph_processing.add_points_to_graph(
+            pois,
+            G,
+            max_dist=max_dist, # Maximum distance from point to graph edge to project the point
+            min_edge_length=min_edge_length # Minimum edge length after adding the new nodes
+        )
+        pois['osmid'] = osmids # Add the ids of the nodes in the graph to points
+        return_points = True
+
+    if all(pois['osmid'].isna()):  # works if points is a pandas DataFrame
+        warnings.warn("Points are too far away from edges. No isochrones returned.", UserWarning)
+        return G
+
+
+    # ----------------------------
+    # Grid clustering
+    # ----------------------------
+    distance_grid = np.sort(distance_grid)
+    pois = cell_cluster(pois, max(distance_grid)).reset_index(drop=True)
+
+    # ----------------------------
+    # POI id handling
+    # ----------------------------
+    if poi_id is None:
+        pois["__index"] = pois.index
+        poi_id = "__index"
+
+    # ----------------------------
+    # Group once
+    # ----------------------------
+    grouped = pois.groupby("cell_id", sort=False)
+
+    cell_ids = np.array(list(grouped.groups.keys()))
+    poi_lists = [grouped.get_group(cid)[poi_id].values for cid in cell_ids]
+    poi_lengths = np.array([len(p) for p in poi_lists])
+
+    max_len = poi_lengths.max()
+
+    # ----------------------------
+    # Build padded POI matrix
+    # ----------------------------
+    poi_matrix = np.full((len(cell_ids), max_len), np.nan)
+
+    for i, p in enumerate(poi_lists):
+        poi_matrix[i, :len(p)] = p
+
+    # ----------------------------
+    # Sampling
+    # ----------------------------
+    for i in range(max_len):
+        for j in range(2):
+            idxs = np.arange(j, len(cell_ids), 2)
+
+            selected_cells = cell_ids[idxs]
+            selected_pois = poi_matrix[idxs, i]
+
+            valid_mask = ~np.isnan(selected_pois)
+            selected_cells = selected_cells[valid_mask]
+            selected_pois = selected_pois[valid_mask]
+
+            poi_selection_gdf = pois[pois[poi_id].isin(selected_pois)].copy()
+            nodes_gdf,edges_gdf = graph(
+                G,
+                poi_selection_gdf,
+                distance_matrix=distance_grid,
+                min_edge_length=min_edge_length,
+                max_dist=max_dist,
+                verbose=False,
+                return_as_gdfs=True
+            )
+            df = pd.DataFrame({f"poi_id_itr_{i}":selected_pois,"cell_id":selected_cells})
+            nodes_gdf["cell_id"] = cell_cluster(nodes_gdf,max(distance_grid),bbox)
+            nodes_gdf = nodes_gdf.merge(df,on="cell_id",how="left")
+            nodes_gdf = nodes_gdf.rename(columns={"accessibility":f"accessibility_itr_{i}"})
+        
+            edges_gdf["cell_id"] = cell_cluster(edges_gdf.geometry.centroid,max(distance_grid),bbox)
+            edges_gdf = edges_gdf.merge(df,on="cell_id",how="left")
+            edges_gdf = edges_gdf.rename(columns={"accessibility":f"accessibility_itr_{i}"})
+        
+            G = ox.graph_from_gdfs(nodes_gdf, edges_gdf, graph_attrs=G.graph)
+
+        
+    if return_points:
+        return G, pois 
+    else:
+        return G
