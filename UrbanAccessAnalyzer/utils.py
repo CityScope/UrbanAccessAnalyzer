@@ -8,6 +8,48 @@ import geopandas as gpd
 from typing import List, Dict, Union
 import osmnx as ox
 from shapely.geometry import Polygon, MultiPolygon, Point
+import requests
+
+def geocode(q, results:int=1, buffer:float=0):
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": q, "format": "json", "limit": results},
+            headers={"User-Agent": "your_email@example.com"},  # Use a real identifier
+            timeout=8
+        )
+        
+        data = r.json()
+        
+        if not data:
+            return None
+        
+        records = []
+        
+        for item in data:
+            lat = float(item["lat"])
+            lon = float(item["lon"])
+            
+            records.append({
+                "query": q,
+                "display_name": item["display_name"],
+                "lat": lat,
+                "lon": lon,
+                "geometry": Point(lon, lat)
+            })
+        
+        gdf = gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:4326")
+        if buffer > 0:
+            crs = gdf.crs 
+            gdf = gdf.to_crs(gdf.estimate_utm_crs())
+            gdf.geometry = gdf.geometry.buffer(buffer)
+            gdf = gdf.to_crs(crs)
+            
+        return gdf
+    
+    except Exception as e:
+        print("Error:", e)
+        return None
 
 def get_city_geometry(city_name: str) -> gpd.GeoDataFrame:
     """
@@ -136,7 +178,7 @@ def get_geographic_suggestions_from_aoi(
                     suggested_country_codes.add(cc.upper())
                 if subdivision := address.get('state') or address.get('province') or address.get('region') or address.get('county'):
                     suggested_subdivision_names.add(subdivision)
-                if municipality := address.get('city') or address.get('town') or address.get('village'):
+                if municipality := address.get('city') or address.get('town') or address.get('village') or address.get('county'):
                     suggested_municipalities.add(municipality)
         except (GeocoderTimedOut, GeocoderServiceError) as e:
             print(f"Geocoding failed for point ({lat}, {lon}): {e}")
