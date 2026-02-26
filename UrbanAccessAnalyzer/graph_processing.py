@@ -10,6 +10,7 @@ from . import osm
 from . import configs 
 import os 
 import warnings
+from pathlib import Path
 
 "TODO: Compute length in polars"
 "TODO: node elevations does not work"
@@ -509,13 +510,19 @@ def simplify_graph(
             )
 
     elif undirected:
+        edges_columns = edges_pl.collect_schema().names()
+        if "maxspeed" in edges_columns:
+            cols = ["sorted_nodes", "length", "maxspeed"]
+        else:
+            cols = ["sorted_nodes", "length"]
+            
         edges_pl = (
             edges_pl.with_columns(
                 pl.concat_list([pl.col("u"), pl.col("v")])
                 .list.sort()
                 .alias("sorted_nodes")
             )
-            .unique(subset=["sorted_nodes", "length", "maxspeed"])
+            .unique(subset=cols)
             .with_columns(
                 pl.col("sorted_nodes").list.get(0).alias("new_u"),
                 pl.col("sorted_nodes").list.get(1).alias("new_v"),
@@ -1464,6 +1471,8 @@ def download_and_create_graph(osm_xml_path,pbf_path=configs.PBF_OSM_PATH,aoi=Non
             network_filter = osm.osmium_network_filter(network_filter)
 
         # Download the region pbf file crop it by aoi and convert to osm format
+        Path(osm_xml_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(pbf_path).parent.mkdir(parents=True, exist_ok=True)
         osm.geofabrik_to_osm(
             osm_xml_path,
             input_file=pbf_path,
