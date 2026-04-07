@@ -21,15 +21,18 @@ build/
 
 no_sync/
 
-# Ignore everything in examples/
-examples/**
+examples 
+scripts 
 
-# BUT include files directly inside examples/ (no subfolders)
-!examples/*
-examples/*/
+# # Ignore everything in examples/
+# examples/**
 
-# Exclude files that start with "local" (both .py and .ipynb or any extension)
-examples/local*
+# # BUT include files directly inside examples/ (no subfolders)
+# !examples/*
+# examples/*/
+
+# # Exclude files that start with "local" (both .py and .ipynb or any extension)
+# examples/local*
 
 api_keys.py
 
