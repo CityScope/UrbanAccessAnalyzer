@@ -23,7 +23,8 @@ import math
 from scipy.ndimage import convolve
 from skimage.morphology import disk, square # For density_raster kernel
 from rasterio.mask import mask
-
+import os 
+import requests
 
 # Define a common WGS84 CRS object for convenience
 WGS84_CRS = CRS.from_epsg(4326)
@@ -710,3 +711,62 @@ def merge(input_paths, bounds: gpd.GeoSeries = None, method='max'):
     # img_bounds = gpd.GeoSeries(shapely.geometry.box(*img_bounds), crs=crs)
 
     return mosaic, out_trans, crs
+
+
+def sample_at_points(points: gpd.GeoDataFrame, raster_array: np.ndarray, 
+                     transform: Affine, crs: CRS) -> list:
+    """
+    Samples a raster array at the locations of points in a GeoDataFrame.
+
+    Parameters
+    ----------
+    gdf : geopandas.GeoDataFrame
+        A GeoDataFrame containing point geometries. It will be reprojected
+        to match the raster's CRS if they differ.
+    raster_array : np.ndarray
+        The 2D NumPy array of raster values (e.g., slope or aspect).
+    transform : rasterio.Affine
+        The affine transformation of the raster array.
+    crs : rasterio.crs.CRS
+        The Coordinate Reference System of the raster array.
+
+    Returns
+    -------
+    list
+        A list of raster values corresponding to each point in the GeoDataFrame.
+        Points outside the raster extent will have a value of np.nan.
+    """
+    # Reproject GeoDataFrame to match raster CRS.
+    gdf_proj = points.to_crs(crs)
+
+    # Extract x and y coordinates from the point geometries.
+    xs = gdf_proj.geometry.x.values
+    ys = gdf_proj.geometry.y.values
+
+    # Use the inverse of the affine transform to convert map coordinates to pixel indices.
+    cols, rows = ~transform * (xs, ys)
+    
+    # Floor the indices to get integer pixel locations.
+    rows = np.floor(rows).astype(int)
+    cols = np.floor(cols).astype(int)
+
+    # Create a mask to identify points that fall within the raster's bounds.
+    valid_mask = (
+        (rows >= 0) & (rows < raster_array.shape[0]) &
+        (cols >= 0) & (cols < raster_array.shape[1])
+    )
+
+    # Initialize an array for the results with a fill value of NaN.
+    sampled_values = np.full(len(gdf_proj), np.nan)
+
+    # Get the valid row and column indices.
+    valid_rows = rows[valid_mask]
+    valid_cols = cols[valid_mask]
+    
+    # Sample the raster at the valid indices.
+    values_at_points = raster_array[valid_rows, valid_cols]
+
+    # Place the sampled values into the results array at the correct positions.
+    sampled_values[valid_mask] = values_at_points
+
+    return list(sampled_values)

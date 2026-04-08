@@ -9,27 +9,48 @@ from typing import List, Dict, Union
 import osmnx as ox
 from shapely.geometry import Polygon, MultiPolygon, Point
 import requests
+import time
 
-def geocode(q, results:int=1, buffer:float=0):
+def geocode(q, results: int = 1, buffer: float = 0):
     try:
+        # ✅ Respect Nominatim rate limit
+        time.sleep(1)
+
         r = requests.get(
             "https://nominatim.openstreetmap.org/search",
-            params={"q": q, "format": "json", "limit": results},
-            headers={"User-Agent": "your_email@example.com"},  # Use a real identifier
+            params={
+                "q": q,
+                "format": "json",
+                "limit": results
+            },
+            headers={
+                # REQUIRED: real identifier (change this!)
+                "User-Agent": "my-geo-script/1.0 (email@mit.edu)"
+            },
             timeout=8
         )
-        
-        data = r.json()
-        
+
+        # Check HTTP status
+        if r.status_code != 200:
+            print("HTTP Error:", r.status_code, r.text[:200])
+            return None
+
+        # Safe JSON parsing
+        try:
+            data = r.json()
+        except Exception:
+            print("Invalid JSON response:", r.text[:200])
+            return None
+
         if not data:
             return None
-        
+
         records = []
-        
+
         for item in data:
             lat = float(item["lat"])
             lon = float(item["lon"])
-            
+
             records.append({
                 "query": q,
                 "display_name": item["display_name"],
@@ -37,16 +58,17 @@ def geocode(q, results:int=1, buffer:float=0):
                 "lon": lon,
                 "geometry": Point(lon, lat)
             })
-        
+
         gdf = gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:4326")
+
         if buffer > 0:
-            crs = gdf.crs 
+            crs = gdf.crs
             gdf = gdf.to_crs(gdf.estimate_utm_crs())
             gdf.geometry = gdf.geometry.buffer(buffer)
             gdf = gdf.to_crs(crs)
-            
+
         return gdf
-    
+
     except Exception as e:
         print("Error:", e)
         return None
