@@ -2,38 +2,43 @@
 docs/_build/
 _build/
 
-# Byte-compiled / optimized / DLL files
+# Python cache files
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual environment
+# Virtual environments
 .venv/
 venv/
 
 # Documentation build files
 docs/build/
 
-# Python egg files
+# Packaging / build artifacts
 *.egg-info
 dist/
 build/
 
+# Misc
 no_sync/
 
-examples 
-scripts 
+# Ignore everything inside examples
+examples/*
 
-# # Ignore everything in examples/
-# examples/**
+# But allow the directory itself
+!examples/
 
-# # BUT include files directly inside examples/ (no subfolders)
-# !examples/*
-# examples/*/
+# Re-include specific notebooks
+!examples/worldwide_public_transport.ipynb
+!examples/rural_schools.ipynb
+!examples/green_spaces.ipynb
+!examples/tsunami.ipynb
 
-# # Exclude files that start with "local" (both .py and .ipynb or any extension)
-# examples/local*
+# Ignore scripts directory (if desired)
+scripts/
 
+# API keys
 api_keys.py
 
+# Presentation files
 presentation/
