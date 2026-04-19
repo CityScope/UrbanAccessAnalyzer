@@ -1,61 +1,65 @@
 """
 urban_access.py
 ===============
-Clases de alto nivel para análisis de accesibilidad urbana.
+High-level classes for urban accessibility analysis.
 
-Organización:
-    - AreaOfInterest        → AOI con geocodificación y descarga de límites
-    - StreetNetwork         → Grafo de calles (descarga, simplificación, isocronas)
-    - PointsOfInterest      → POIs desde OSM o GeoDataFrame externo
-    - H3Grid                → Rejilla hexagonal H3 (rasterización y agregación)
-    - PopulationLayer       → Población WorldPop o GeoDataFrame propio
-    - AccessibilityAnalyzer → Orquestador: une red + POIs → accesibilidad
+Classes
+-------
+- AreaOfInterest        → Area of interest with geocoding and boundary download
+- StreetNetwork         → Street graph (download, simplification, isochrones)
+- PointsOfInterest      → POIs from OSM or an external GeoDataFrame
+- H3Grid                → H3 hexagonal grid (rasterisation and aggregation)
+- PopulationLayer       → WorldPop or custom population data
+- AccessibilityAnalyzer → Orchestrator: network + POIs → accessibility scores
 
-Cada clase expone:
-    .data          → GeoDataFrame / DataFrame / grafo con el resultado principal
-    .plot()        → Mapa Folium interactivo
-    .to_h3()       → Convierte .data a H3Grid
-    .save(path)    → Persiste el objeto en disco
-    .load(path)    → (classmethod) Restaura el objeto desde disco
+Common interface
+----------------
+Every class exposes:
+    .data          → GeoDataFrame / DataFrame / graph with the main result
+    .plot()        → Interactive Folium map
+    .to_h3()       → Converts .data to an H3Grid
+    .save(path)    → Persists the object to disk
+    .load(path)    → (classmethod) Restores the object from disk
 
 ════════════════════════════════════════════════════════════════════════════════
-Estrategia de persistencia
+Persistence strategy
 ════════════════════════════════════════════════════════════════════════════════
 
-Cada instancia se guarda como un directorio con:
+Each instance is saved as a **directory** containing:
 
     <path>/
-        manifest.json         → clase, versión, formato, metadatos escalares
-        <datos específicos>   → ver tabla abajo
+        manifest.json         → class name, version, format, scalar metadata
+        <class-specific data> → see table below
 
-Clase                Archivos generados
+Class                Files written
 ──────────────────   ────────────────────────────────────────────────────────
 AreaOfInterest       aoi.<ext>
 StreetNetwork        nodes.<ext>  edges.<ext>  graph_attrs.json
 PointsOfInterest     pois.<ext>
-H3Grid               grid.parquet              (siempre Parquet; sin geometría)
-PopulationLayer      population.<ext>  (si GeoDataFrame) | referencia (si raster)
+H3Grid               grid.parquet              (always Parquet; no geometry)
+PopulationLayer      population.<ext>  (GeoDataFrame) | path reference (raster)
 AccessibilityAnalyzer
                      network/  pois/  [result_network/]  manifest.json
 
-Formatos geoespaciales soportados (parámetro ``fmt``):
-    "geoparquet"  → GeoParquet + zstd + geoarrow  [DEFAULT — backend óptimo]
-    "parquet"     → alias de "geoparquet"
+Supported geospatial formats (``fmt`` parameter)
+    "geoparquet"  → GeoParquet + zstd + geoarrow  [DEFAULT — optimal for backends]
+    "parquet"     → alias for "geoparquet"
     "fgb"         → FlatGeobuf                     [streaming / map tiles]
-    "gpkg"        → GeoPackage                     [compatible QGIS / GDAL]
-    "geojson"     → GeoJSON                        [interoperabilidad web]
+    "gpkg"        → GeoPackage                     [QGIS / GDAL compatible]
+    "geojson"     → GeoJSON                        [web interoperability]
     "shp"         → Shapefile                      [legacy GIS]
 
-H3Grid usa siempre Parquet plano (sin geometría). La geometría se reconstruye
-desde el índice h3_cell bajo demanda → archivo mínimo, consultable con
-DuckDB / Polars / pandas sin dependencias geoespaciales.
+H3Grid always uses flat Parquet (no geometry stored on disk). Hexagon
+geometries are reconstructed on demand from the h3_cell index, keeping the
+file minimal and directly queryable with DuckDB / Polars / pandas without
+any geospatial dependencies.
 
-StreetNetwork separa nodos y aristas en ficheros independientes:
-    • Nodos en GeoParquet/Parquet: sin columna geometry (x,y son suficientes),
-      ahorrando ~30 % de espacio. En otros formatos se guarda con Point.
-    • Aristas: siempre con geometría LineString.
-    • graph_attrs.json: atributos del grafo (crs, name, …).
-    • El grafo NetworkX se reconstruye con ox.graph_from_gdfs() al cargar.
+StreetNetwork stores nodes and edges as separate files:
+    - Nodes in GeoParquet/Parquet: no geometry column (x, y are sufficient),
+      saving ~30 % of space. Other formats include a Point geometry for GIS.
+    - Edges: always stored with LineString geometry.
+    - graph_attrs.json: graph-level attributes (crs, name, …).
+    - The NetworkX graph is reconstructed via ox.graph_from_gdfs() on load.
 """
 
 from __future__ import annotations
@@ -70,50 +74,38 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 
-# ── Lazy imports ───────────────────────────────────────────────────────────────
+# ── osmnx (optional at import time, required when used) ───────────────────────
 try:
     import osmnx as ox
 except ImportError:
     ox = None  # type: ignore
 
-try:
-    from . import (
-        geometry_utils,
-        graph_processing,
-        h3_utils,
-        isochrones,
-        osm,
-        plot_helpers,
-        poi_utils,
-        population as pop_module,
-        quality,
-        utils,
-    )
-except ImportError:
-    import geometry_utils
-    import graph_processing
-    import h3_utils
-    import isochrones
-    import osm
-    import plot_helpers
-    import poi_utils
-    import population as pop_module
-    import quality
-    import utils
+# ── Internal package modules (always relative) ────────────────────────────────
+from . import (
+    geometry_utils,
+    graph_processing,
+    h3_utils,
+    isochrones,
+    osm,
+    plot_helpers,
+    poi_utils,
+    population as pop_module,
+    quality,
+    utils,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Tipos y constantes
+# Types and constants
 # ──────────────────────────────────────────────────────────────────────────────
 
 GeoFmt = Literal["geoparquet", "parquet", "fgb", "gpkg", "geojson", "shp"]
 
 _FORMAT_VERSION = "1.0"
 
-# Mapeo formato → extensión
 _FMT_EXT: Dict[str, str] = {
     "geoparquet": ".geoparquet",
-    "parquet":    ".geoparquet",   # alias
+    "parquet":    ".geoparquet",  # alias
     "fgb":        ".fgb",
     "gpkg":       ".gpkg",
     "geojson":    ".geojson",
@@ -122,27 +114,22 @@ _FMT_EXT: Dict[str, str] = {
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# I/O de bajo nivel — GeoDataFrame
+# Low-level I/O — GeoDataFrame
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _save_gdf(gdf: gpd.GeoDataFrame, directory: Path, stem: str, fmt: str) -> str:
     """
-    Guarda un GeoDataFrame en el formato indicado.
+    Save a GeoDataFrame in the requested format.
 
-    Preserva el índice nombrado como columna para que la carga sea exacta.
-    Devuelve el nombre del archivo relativo al directorio (para el manifest).
+    A named index is reset to a column so it survives the round-trip intact.
+    Returns the filename relative to *directory* (stored in the manifest).
     """
     fmt = fmt.lower()
     if fmt not in _FMT_EXT:
-        raise ValueError(
-            f"Formato no soportado: '{fmt}'. "
-            f"Opciones: {list(_FMT_EXT)}"
-        )
-    ext = _FMT_EXT[fmt]
-    filename = f"{stem}{ext}"
-    dest = directory / filename
+        raise ValueError(f"Unsupported format: '{fmt}'. Options: {list(_FMT_EXT)}")
 
-    # Preservar índice con nombre como columna
+    dest = directory / f"{stem}{_FMT_EXT[fmt]}"
+
     if gdf.index.name and gdf.index.name not in gdf.columns:
         gdf = gdf.reset_index()
 
@@ -157,26 +144,23 @@ def _save_gdf(gdf: gpd.GeoDataFrame, directory: Path, stem: str, fmt: str) -> st
     elif fmt == "shp":
         gdf.to_file(dest, driver="ESRI Shapefile")
 
-    return filename
+    return dest.name
 
 
 def _load_gdf(directory: Path, filename: str) -> gpd.GeoDataFrame:
-    """Carga un GeoDataFrame detectando el formato por extensión."""
+    """Load a GeoDataFrame, auto-detecting the format from the file extension."""
     p = directory / filename
     if not p.exists():
-        raise FileNotFoundError(f"No se encontró: {p}")
-    ext = p.suffix.lower()
-    if ext in (".geoparquet", ".parquet"):
-        return gpd.read_parquet(p)
-    return gpd.read_file(p)
+        raise FileNotFoundError(f"File not found: {p}")
+    return gpd.read_parquet(p) if p.suffix.lower() in (".geoparquet", ".parquet") else gpd.read_file(p)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# I/O de bajo nivel — DataFrame plano (H3Grid)
+# Low-level I/O — flat DataFrame (H3Grid)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _save_df(df: pd.DataFrame, directory: Path, stem: str) -> str:
-    """Guarda un DataFrame sin geometría como Parquet comprimido."""
+    """Save a geometry-free DataFrame as compressed Parquet."""
     filename = f"{stem}.parquet"
     df.to_parquet(directory / filename, compression="zstd")
     return filename
@@ -187,11 +171,11 @@ def _load_df(directory: Path, stem: str) -> pd.DataFrame:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# I/O de bajo nivel — Grafo OSMnx
+# Low-level I/O — OSMnx graph
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _sanitize_col(series: pd.Series) -> pd.Series:
-    """Convierte listas/dicts a JSON string para formatos columnares."""
+    """Serialize list/dict values to JSON strings for columnar formats."""
     if series.dtype != object:
         return series
     return series.apply(
@@ -200,7 +184,7 @@ def _sanitize_col(series: pd.Series) -> pd.Series:
 
 
 def _deserialize_col(series: pd.Series) -> pd.Series:
-    """Recupera listas/dicts desde JSON string si procede."""
+    """Restore list/dict values from JSON strings where applicable."""
     if series.dtype != object:
         return series
 
@@ -220,29 +204,29 @@ def _deserialize_col(series: pd.Series) -> pd.Series:
 
 def _save_graph(G, directory: Path, fmt: str) -> Dict[str, str]:
     """
-    Persiste un grafo OSMnx como par nodos + aristas.
+    Persist an OSMnx graph as a nodes + edges pair of files.
 
-    Decisiones de diseño
-    ────────────────────
-    GeoParquet/Parquet
-      • Nodos: solo columnas escalares + x, y. Se omite la columna geometry
-        Point (redundante: se reconstruye desde x,y al cargar).
-        Ahorro ≈ 30 % de espacio respecto a guardar la geometría.
-      • Aristas: con geometría LineString + columnas aplanadas desde MultiIndex.
-        Tipos complejos (listas OSM) → JSON string.
+    Design decisions
+    ────────────────
+    GeoParquet / Parquet
+      • Nodes: scalar columns only + x, y coordinates. The redundant Point
+        geometry column is dropped, saving ~30 % of space. It is reconstructed
+        from x, y on load.
+      • Edges: LineString geometry + columns flattened from the MultiIndex.
+        Complex OSM attribute types (lists, dicts) are serialised to JSON strings.
 
-    Otros formatos (fgb, gpkg, geojson, shp)
-      • Nodos: con geometría Point (necesario para QGIS y herramientas GIS).
-      • Aristas: con geometría LineString.
+    Other formats (fgb, gpkg, geojson, shp)
+      • Nodes: Point geometry included for GIS tool compatibility.
+      • Edges: LineString geometry.
 
-    graph_attrs.json almacena los atributos del grafo (crs, name, etc.)
-    y es siempre JSON independientemente del fmt elegido.
+    graph_attrs.json stores graph-level attributes (crs, name, …) and is
+    always written as JSON regardless of the chosen format.
 
-    Devuelve un dict con los nombres de archivo para el manifest.
+    Returns a dict of {key: filename} references for the manifest.
     """
     nodes_gdf, edges_gdf = ox.graph_to_gdfs(G)
 
-    # Serializar columnas con tipos complejos
+    # Serialise complex columns
     for col in nodes_gdf.select_dtypes("object").columns:
         nodes_gdf[col] = _sanitize_col(nodes_gdf[col])
     for col in edges_gdf.select_dtypes("object").columns:
@@ -250,22 +234,21 @@ def _save_graph(G, directory: Path, fmt: str) -> Dict[str, str]:
 
     fmt_norm = fmt.lower()
 
-    # ── Nodos ─────────────────────────────────────────────────────────────────
-    nodes_flat = nodes_gdf.reset_index()  # osmid → columna
+    # ── Nodes ─────────────────────────────────────────────────────────────────
+    nodes_flat = nodes_gdf.reset_index()  # osmid → plain column
 
     if fmt_norm in ("geoparquet", "parquet"):
-        # Sin geometría: x e y son suficientes y más compactos
         nodes_df = pd.DataFrame(nodes_flat.drop(columns=["geometry"]))
         nodes_file = "nodes.parquet"
         nodes_df.to_parquet(directory / nodes_file, compression="zstd")
     else:
         nodes_file = _save_gdf(nodes_flat, directory, "nodes", fmt)
 
-    # ── Aristas ───────────────────────────────────────────────────────────────
-    edges_flat = edges_gdf.reset_index()  # u, v, key → columnas
+    # ── Edges ─────────────────────────────────────────────────────────────────
+    edges_flat = edges_gdf.reset_index()  # u, v, key → plain columns
     edges_file = _save_gdf(edges_flat, directory, "edges", fmt)
 
-    # ── Atributos del grafo ───────────────────────────────────────────────────
+    # ── Graph attributes ──────────────────────────────────────────────────────
     graph_attrs = {k: str(v) for k, v in G.graph.items()}
     (directory / "graph_attrs.json").write_text(
         json.dumps(graph_attrs, indent=2), encoding="utf-8"
@@ -280,18 +263,16 @@ def _save_graph(G, directory: Path, fmt: str) -> Dict[str, str]:
 
 def _load_graph(directory: Path, nodes_file: str, edges_file: str):
     """
-    Reconstruye el grafo OSMnx desde los archivos de nodos y aristas.
+    Reconstruct an OSMnx graph from the stored nodes and edges files.
 
-    Tolerante: recalcula 'length' si no está en las aristas.
+    Tolerant: recalculates 'length' if the column is missing from edges.
     """
     graph_attrs = json.loads(
         (directory / "graph_attrs.json").read_text(encoding="utf-8")
     )
 
-    # ── Nodos ─────────────────────────────────────────────────────────────────
+    # ── Nodes ─────────────────────────────────────────────────────────────────
     nodes_path = directory / nodes_file
-
-    # Parquet plano (sin geometría) vs GeoParquet/otro formato con geometría
     is_flat_parquet = (
         nodes_path.suffix.lower() == ".parquet"
         and not nodes_file.endswith(".geoparquet")
@@ -315,7 +296,7 @@ def _load_graph(directory: Path, nodes_file: str, edges_file: str):
     if "osmid" in nodes_gdf.columns:
         nodes_gdf = nodes_gdf.set_index("osmid")
 
-    # ── Aristas ───────────────────────────────────────────────────────────────
+    # ── Edges ─────────────────────────────────────────────────────────────────
     edges_gdf = _load_gdf(directory, edges_file)
     for col in edges_gdf.select_dtypes("object").columns:
         edges_gdf[col] = _deserialize_col(edges_gdf[col])
@@ -326,16 +307,14 @@ def _load_graph(directory: Path, nodes_file: str, edges_file: str):
     edges_gdf = edges_gdf.set_index(["u", "v", "key"])
 
     if "length" not in edges_gdf.columns:
-        warnings.warn(
-            "Columna 'length' no encontrada en aristas; recalculando.", UserWarning
-        )
+        warnings.warn("Column 'length' missing from edges; recalculating.", UserWarning)
         edges_gdf["length"] = edges_gdf.geometry.length
 
     return ox.graph_from_gdfs(nodes_gdf, edges_gdf, graph_attrs=graph_attrs)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Helpers de manifest y directorio
+# Manifest and directory helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _write_manifest(directory: Path, class_name: str, meta: dict) -> None:
@@ -348,7 +327,7 @@ def _write_manifest(directory: Path, class_name: str, meta: dict) -> None:
 def _read_manifest(directory: Path) -> dict:
     p = directory / "manifest.json"
     if not p.exists():
-        raise FileNotFoundError(f"No se encontró manifest.json en '{directory}'")
+        raise FileNotFoundError(f"manifest.json not found in '{directory}'")
     return json.loads(p.read_text(encoding="utf-8"))
 
 
@@ -356,8 +335,8 @@ def _check_class(manifest: dict, expected: str) -> None:
     found = manifest.get("class")
     if found != expected:
         raise TypeError(
-            f"Se intentó cargar un '{expected}' pero el directorio "
-            f"contiene un '{found}'. Usa la clase correcta para load()."
+            f"Tried to load a '{expected}' but the directory contains "
+            f"a '{found}'. Use the correct class for load()."
         )
 
 
@@ -366,8 +345,7 @@ def _ensure_dir(path: Union[str, Path], overwrite: bool) -> Path:
     if p.exists():
         if not overwrite:
             raise FileExistsError(
-                f"El directorio '{p}' ya existe. "
-                f"Usa overwrite=True para sobreescribir."
+                f"Directory '{p}' already exists. Pass overwrite=True to replace it."
             )
         shutil.rmtree(p)
     p.mkdir(parents=True)
@@ -382,10 +360,13 @@ def _ensure_gdf(data, crs=None) -> gpd.GeoDataFrame:
     elif isinstance(data, str):
         gdf = geometry_utils.read_geofile(data)
     else:
-        raise TypeError(f"Tipo no soportado: {type(data)}")
-    if crs is not None:
-        gdf = gdf.to_crs(crs)
-    return gdf
+        raise TypeError(f"Unsupported input type: {type(data)}")
+    return gdf if crs is None else gdf.to_crs(crs)
+
+
+def _bounds_from(aoi) -> gpd.GeoDataFrame:
+    """Extract the underlying GeoDataFrame from an AOI-like object."""
+    return aoi.data if isinstance(aoi, AreaOfInterest) else aoi
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -394,22 +375,23 @@ def _ensure_gdf(data, crs=None) -> gpd.GeoDataFrame:
 
 class AreaOfInterest:
     """
-    Define y gestiona el área de interés (AOI) del análisis.
+    Define and manage the area of interest (AOI) for an analysis.
 
     Parameters
     ----------
     data : str | GeoDataFrame | GeoSeries
-        Nombre de ciudad (geocodifica automáticamente), ruta a archivo, o geodata.
+        City name (geocoded automatically), path to a geospatial file, or
+        a GeoDataFrame / GeoSeries with the AOI geometry.
     crs : int, optional
-        CRS de salida. Por defecto 4326.
+        Output CRS. Defaults to 4326 (WGS 84).
     buffer : float, optional
-        Buffer en metros aplicado tras cargar la geometría.
+        Buffer distance in metres applied after loading the geometry.
 
-    Persistencia
-    ------------
-    >>> aoi.save("output/my_aoi")                  # GeoParquet por defecto
-    >>> aoi.save("output/my_aoi", fmt="geojson")   # GeoJSON
-    >>> aoi.save("output/my_aoi", fmt="gpkg")      # GeoPackage
+    Persistence
+    -----------
+    >>> aoi.save("output/my_aoi")                  # GeoParquet (default)
+    >>> aoi.save("output/my_aoi", fmt="geojson")
+    >>> aoi.save("output/my_aoi", fmt="gpkg")
     >>> aoi = AreaOfInterest.load("output/my_aoi")
     """
 
@@ -425,10 +407,12 @@ class AreaOfInterest:
             gdf = _ensure_gdf(data)
 
         gdf = gdf.to_crs(4326)
+
         if buffer > 0:
             gdf = gdf.to_crs(gdf.estimate_utm_crs())
-            gdf.geometry = gdf.geometry.buffer(buffer)
+            gdf = gdf.assign(geometry=gdf.geometry.buffer(buffer))
             gdf = gdf.to_crs(4326)
+
         if crs != 4326:
             gdf = gdf.to_crs(crs)
 
@@ -436,26 +420,34 @@ class AreaOfInterest:
         self.crs = crs
         self._buffer = buffer
 
+    # ── Properties ────────────────────────────────────────────────────────────
+
     @property
     def geometry(self) -> gpd.GeoSeries:
         return self.data.geometry
 
     @property
     def union(self):
+        """Single union geometry of all AOI features."""
         return self.data.union_all()
 
     @property
     def bounds(self) -> tuple:
         return tuple(self.data.total_bounds)
 
+    # ── Methods ───────────────────────────────────────────────────────────────
+
     def clip(self, gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-        gdf = gdf.to_crs(self.data.crs)
-        return gdf[gdf.intersects(self.union)]
+        """Clip a GeoDataFrame to the AOI extent."""
+        return gdf.to_crs(self.data.crs).loc[
+            lambda g: g.intersects(self.union)
+        ]
 
     def plot(self, **kwargs):
+        """Interactive Folium map of the AOI."""
         return plot_helpers.general_map(aoi=self.data, **kwargs)
 
-    # ── Persistencia ──────────────────────────────────────────────────────────
+    # ── Persistence ───────────────────────────────────────────────────────────
 
     def save(
         self,
@@ -464,20 +456,21 @@ class AreaOfInterest:
         overwrite: bool = True,
     ) -> Path:
         """
-        Guarda el AOI en disco.
+        Save the AOI to disk.
 
         Parameters
         ----------
         path : str | Path
-            Directorio de salida (se crea si no existe).
+            Output directory (created if it does not exist).
         fmt : GeoFmt
-            Formato de salida: "geoparquet" | "fgb" | "gpkg" | "geojson" | "shp".
+            Output format: "geoparquet" | "fgb" | "gpkg" | "geojson" | "shp".
         overwrite : bool
-            Si True (defecto), sobreescribe el directorio existente.
+            If True (default), an existing directory is replaced.
 
         Returns
         -------
-        Path del directorio creado.
+        Path
+            Path of the created directory.
 
         Examples
         --------
@@ -487,22 +480,19 @@ class AreaOfInterest:
         directory = _ensure_dir(path, overwrite)
         filename = _save_gdf(self.data, directory, "aoi", fmt)
         _write_manifest(directory, "AreaOfInterest", {
-            "fmt": fmt,
-            "crs": self.crs,
-            "buffer": self._buffer,
-            "aoi_file": filename,
+            "fmt": fmt, "crs": self.crs, "buffer": self._buffer, "aoi_file": filename,
         })
         return directory
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "AreaOfInterest":
         """
-        Carga un AreaOfInterest desde un directorio creado con ``save()``.
+        Load an AreaOfInterest from a directory created by ``save()``.
 
         Parameters
         ----------
         path : str | Path
-            Directorio de persistencia.
+            Persistence directory.
 
         Examples
         --------
@@ -512,14 +502,13 @@ class AreaOfInterest:
         manifest = _read_manifest(directory)
         _check_class(manifest, "AreaOfInterest")
 
-        gdf = _load_gdf(directory, manifest["aoi_file"])
         obj = cls.__new__(cls)
-        obj.data = gdf
+        obj.data = _load_gdf(directory, manifest["aoi_file"])
         obj.crs = manifest.get("crs", 4326)
         obj._buffer = manifest.get("buffer", 0.0)
         return obj
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"AreaOfInterest(geometries={len(self.data)}, crs={self.data.crs.to_epsg()})"
 
 
@@ -529,30 +518,31 @@ class AreaOfInterest:
 
 class StreetNetwork:
     """
-    Grafo de red de calles basado en OSMnx.
+    OSMnx-based street network graph.
 
     Parameters
     ----------
     aoi : AreaOfInterest | GeoDataFrame | GeoSeries
-        Área de interés para la descarga.
+        Area of interest used for the download.
     network_type : str
-        "walk" | "bike" | "drive" | "all".
+        OSMnx network type: "walk" | "bike" | "drive" | "all".
     custom_filter : str, optional
-        Filtro OSM personalizado (sintaxis osmnx).
+        Custom OSM filter string (osmnx syntax).
     min_edge_length : float, optional
-        Simplificación mínima de arista en metros. 0 = sin simplificación.
+        Minimum edge length in metres for simplification. 0 = no simplification.
     G : networkx.MultiDiGraph, optional
-        Grafo ya construido (omite la descarga).
+        Pre-built graph; skips the download when provided.
 
-    Persistencia
-    ------------
-    >>> net.save("data/berlin_walk")                # GeoParquet (defecto)
-    >>> net.save("data/berlin_walk", fmt="fgb")     # FlatGeobuf
-    >>> net.save("data/berlin_walk", fmt="gpkg")    # GeoPackage (QGIS)
+    Persistence
+    -----------
+    >>> net.save("data/berlin_walk")                # GeoParquet (default)
+    >>> net.save("data/berlin_walk", fmt="fgb")
+    >>> net.save("data/berlin_walk", fmt="gpkg")    # opens in QGIS
     >>> net = StreetNetwork.load("data/berlin_walk")
 
-    Estructura del directorio:
-        nodes.parquet       (GeoParquet) o nodes.<ext>
+    Directory layout::
+
+        nodes.parquet       (GeoParquet) or nodes.<ext>
         edges.<ext>
         graph_attrs.json
         manifest.json
@@ -566,7 +556,9 @@ class StreetNetwork:
         min_edge_length: float = 0.0,
         G=None,
     ):
-        bounds = aoi.data if isinstance(aoi, AreaOfInterest) else _ensure_gdf(aoi)
+        bounds = _bounds_from(aoi) if not isinstance(aoi, gpd.GeoDataFrame) else aoi
+        if isinstance(aoi, AreaOfInterest):
+            bounds = aoi.data
 
         if G is not None:
             self._G = G
@@ -587,66 +579,107 @@ class StreetNetwork:
         self._nodes: Optional[gpd.GeoDataFrame] = None
         self._edges: Optional[gpd.GeoDataFrame] = None
 
-    # ── Propiedades (lazy) ────────────────────────────────────────────────────
+    # ── Lazy properties ───────────────────────────────────────────────────────
 
     @property
     def graph(self):
+        """Underlying NetworkX MultiDiGraph."""
         return self._G
 
     @property
     def nodes(self) -> gpd.GeoDataFrame:
+        """Node GeoDataFrame (computed and cached on first access)."""
         if self._nodes is None:
             self._nodes, self._edges = ox.graph_to_gdfs(self._G)
         return self._nodes
 
     @property
     def edges(self) -> gpd.GeoDataFrame:
+        """Edge GeoDataFrame (computed and cached on first access)."""
         if self._edges is None:
             self._nodes, self._edges = ox.graph_to_gdfs(self._G)
         return self._edges
 
     @property
     def data(self) -> gpd.GeoDataFrame:
+        """Alias for ``edges`` — uniform interface with other classes."""
         return self.edges
 
-    def _invalidate_cache(self):
+    def _invalidate_cache(self) -> None:
         self._nodes = None
         self._edges = None
 
-    # ── Métodos ───────────────────────────────────────────────────────────────
+    # ── Methods ───────────────────────────────────────────────────────────────
 
     def simplify(
-        self, min_edge_length=0, min_edge_separation=0,
-        loops=True, multi=True, undirected=False,
+        self,
+        min_edge_length: float = 0,
+        min_edge_separation: float = 0,
+        loops: bool = True,
+        multi: bool = True,
+        undirected: bool = False,
     ) -> "StreetNetwork":
+        """Return a new simplified StreetNetwork."""
         new_G = graph_processing.simplify_graph(
-            self._G, min_edge_length=min_edge_length,
+            self._G,
+            min_edge_length=min_edge_length,
             min_edge_separation=min_edge_separation,
-            loops=loops, multi=multi, undirected=undirected,
+            loops=loops,
+            multi=multi,
+            undirected=undirected,
         )
         return StreetNetwork(aoi=self.nodes, G=new_G, network_type=self.network_type)
 
-    def crop(self, aoi) -> "StreetNetwork":
-        aoi_gdf = aoi.data if isinstance(aoi, AreaOfInterest) else aoi
-        new_G = graph_processing.crop_by_aoi(aoi_gdf, G=self._G)
-        return StreetNetwork(aoi=aoi_gdf, G=new_G, network_type=self.network_type)
+    def crop(self, aoi: Union["AreaOfInterest", gpd.GeoDataFrame]) -> "StreetNetwork":
+        """Return a new StreetNetwork clipped to *aoi*."""
+        aoi_gdf = _bounds_from(aoi)
+        return StreetNetwork(
+            aoi=aoi_gdf,
+            G=graph_processing.crop_by_aoi(aoi_gdf, G=self._G),
+            network_type=self.network_type,
+        )
 
-    def nearest_nodes(self, geometries, max_dist=None) -> list:
+    def nearest_nodes(
+        self,
+        geometries: Union[gpd.GeoDataFrame, gpd.GeoSeries],
+        max_dist: Optional[float] = None,
+    ) -> list:
+        """Return the node IDs nearest to each geometry."""
         return graph_processing.nearest_nodes(geometries, self._G, max_dist=max_dist)
 
-    def add_points(self, points, max_dist=None, min_edge_length=0):
+    def add_points(
+        self,
+        points: Union[gpd.GeoDataFrame, gpd.GeoSeries],
+        max_dist: Optional[float] = None,
+        min_edge_length: float = 0,
+    ) -> tuple["StreetNetwork", list]:
+        """
+        Project points onto the graph and return ``(StreetNetwork, osmids)``.
+
+        The returned osmids can be used directly as origin nodes for isochrones.
+        """
         new_G, osmids = graph_processing.add_points_to_graph(
             points, self._G, max_dist=max_dist, min_edge_length=min_edge_length
         )
         return StreetNetwork(aoi=self.nodes, G=new_G, network_type=self.network_type), osmids
 
-    def plot(self, aoi=None, column=None, cmap=None, **kwargs):
-        aoi_gdf = aoi.data if isinstance(aoi, AreaOfInterest) else aoi
+    def plot(
+        self,
+        aoi: Optional[Union["AreaOfInterest", gpd.GeoDataFrame]] = None,
+        column: Optional[str] = None,
+        cmap: Optional[str] = None,
+        **kwargs,
+    ):
+        """Interactive Folium map of the network."""
         return plot_helpers.general_map(
-            aoi=aoi_gdf, gdfs=[self.edges], column=column, cmap=cmap, **kwargs
+            aoi=_bounds_from(aoi) if aoi is not None else None,
+            gdfs=[self.edges],
+            column=column,
+            cmap=cmap,
+            **kwargs,
         )
 
-    # ── Persistencia ──────────────────────────────────────────────────────────
+    # ── Persistence ───────────────────────────────────────────────────────────
 
     def save(
         self,
@@ -655,26 +688,26 @@ class StreetNetwork:
         overwrite: bool = True,
     ) -> Path:
         """
-        Guarda la red de calles en disco.
+        Save the street network to disk.
 
-        En formato GeoParquet/Parquet los nodos se guardan sin columna
-        geometry (solo x, y) ahorrando ~30 % de espacio. En otros formatos
-        se incluye la geometría Point para compatibilidad GIS.
-        Las aristas siempre se guardan con geometría LineString.
+        In GeoParquet / Parquet format, nodes are stored without a geometry
+        column (only x, y), saving ~30 % of space. Other formats include the
+        Point geometry for GIS compatibility. Edges always include LineString
+        geometry.
 
         Parameters
         ----------
         path : str | Path
-            Directorio de salida.
+            Output directory.
         fmt : GeoFmt
             "geoparquet" | "fgb" | "gpkg" | "geojson" | "shp".
         overwrite : bool
-            Sobreescribir si existe.
+            Replace an existing directory if True.
 
         Examples
         --------
         >>> net.save("data/berlin_walk")
-        >>> net.save("data/berlin_walk", fmt="gpkg")   # abre en QGIS
+        >>> net.save("data/berlin_walk", fmt="gpkg")
         """
         directory = _ensure_dir(path, overwrite)
         file_refs = _save_graph(self._G, directory, fmt)
@@ -689,12 +722,12 @@ class StreetNetwork:
     @classmethod
     def load(cls, path: Union[str, Path]) -> "StreetNetwork":
         """
-        Carga una StreetNetwork desde un directorio creado con ``save()``.
+        Load a StreetNetwork from a directory created by ``save()``.
 
         Parameters
         ----------
         path : str | Path
-            Directorio de persistencia.
+            Persistence directory.
 
         Examples
         --------
@@ -704,20 +737,19 @@ class StreetNetwork:
         manifest = _read_manifest(directory)
         _check_class(manifest, "StreetNetwork")
 
-        G = _load_graph(
+        obj = cls.__new__(cls)
+        obj._G = _load_graph(
             directory,
             nodes_file=manifest["nodes_file"],
             edges_file=manifest["edges_file"],
         )
-        obj = cls.__new__(cls)
-        obj._G = G
         obj.network_type = manifest.get("network_type", "walk")
         obj._custom_filter = manifest.get("custom_filter")
         obj._nodes = None
         obj._edges = None
         return obj
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"StreetNetwork(nodes={self._G.number_of_nodes()}, "
             f"edges={self._G.number_of_edges()}, "
@@ -731,19 +763,20 @@ class StreetNetwork:
 
 class PointsOfInterest:
     """
-    Carga y preprocesa puntos de interés (POIs).
+    Load and pre-process points of interest (POIs).
 
     Parameters
     ----------
     data : GeoDataFrame | str | None
-        GeoDataFrame de POIs, ruta a archivo, o None (usar from_osm_*).
+        POI GeoDataFrame, path to a geospatial file, or None (use a
+        ``from_osm_*`` class method).
     quality_column : str, optional
-        Columna con puntuación de calidad [0, 1].
+        Column holding a quality score in [0, 1].
     aoi : AreaOfInterest | GeoDataFrame, optional
-        Filtra los POIs al AOI.
+        Filters the POIs to the AOI on construction.
 
-    Persistencia
-    ------------
+    Persistence
+    -----------
     >>> pois.save("data/parks")
     >>> pois.save("data/parks", fmt="geojson")
     >>> pois = PointsOfInterest.load("data/parks")
@@ -761,77 +794,85 @@ class PointsOfInterest:
         self.quality_column = quality_column
 
         if aoi is not None and self._data is not None:
-            aoi_gdf = aoi.data if isinstance(aoi, AreaOfInterest) else aoi
-            self._data = self._data[
+            aoi_gdf = _bounds_from(aoi)
+            self._data = self._data.loc[
                 self._data.to_crs(aoi_gdf.crs).intersects(aoi_gdf.union_all())
             ]
 
-    # ── Constructores OSM ─────────────────────────────────────────────────────
+    # ── OSM constructors ──────────────────────────────────────────────────────
 
     @classmethod
-    def _from_osm(cls, fn, aoi, **kwargs) -> "PointsOfInterest":
-        bounds = aoi.data if isinstance(aoi, AreaOfInterest) else aoi
-        return cls(data=fn(bounds, **kwargs), aoi=aoi)
+    def _from_osm(cls, fn: Callable, aoi, **kwargs) -> "PointsOfInterest":
+        return cls(data=fn(_bounds_from(aoi), **kwargs), aoi=aoi)
 
     @classmethod
     def from_osm_parks(cls, aoi, **kwargs) -> "PointsOfInterest":
-        """Descarga parques y áreas verdes desde OSM."""
+        """Download parks and green areas from OSM."""
         return cls._from_osm(osm.green_areas, aoi, **kwargs)
 
     @classmethod
     def from_osm_bus_stops(cls, aoi) -> "PointsOfInterest":
-        """Descarga paradas de autobús desde OSM."""
+        """Download bus stops from OSM."""
         return cls._from_osm(osm.bus_stops, aoi)
 
     @classmethod
     def from_osm_schools(cls, aoi) -> "PointsOfInterest":
-        """Descarga colegios desde OSM."""
+        """Download schools from OSM."""
         return cls._from_osm(osm.schools, aoi)
 
     @classmethod
     def from_osm_healthcare(cls, aoi) -> "PointsOfInterest":
-        """Descarga centros sanitarios desde OSM."""
+        """Download healthcare facilities from OSM."""
         return cls._from_osm(osm.healthcare, aoi)
 
     @classmethod
     def from_osm_groceries(cls, aoi) -> "PointsOfInterest":
-        """Descarga supermercados desde OSM."""
+        """Download supermarkets and grocery stores from OSM."""
         return cls._from_osm(osm.groceries, aoi)
 
     @classmethod
     def from_osm_restaurants(cls, aoi) -> "PointsOfInterest":
-        """Descarga restaurantes y bares desde OSM."""
+        """Download restaurants and bars from OSM."""
         return cls._from_osm(osm.restaurants, aoi)
 
     @classmethod
     def from_overpass_query(cls, aoi, query: str) -> "PointsOfInterest":
-        """Ejecuta una consulta Overpass personalizada."""
-        bounds = aoi.data if isinstance(aoi, AreaOfInterest) else aoi
-        return cls(data=osm.overpass_api_query(query, bounds), aoi=aoi)
+        """Execute a custom Overpass QL query."""
+        return cls(data=osm.overpass_api_query(query, _bounds_from(aoi)), aoi=aoi)
 
-    # ── Propiedad principal ───────────────────────────────────────────────────
+    # ── Main property ─────────────────────────────────────────────────────────
 
     @property
     def data(self) -> gpd.GeoDataFrame:
         if self._data is None:
-            raise ValueError("No hay POIs cargados. Usa un método from_osm_* primero.")
+            raise ValueError("No POIs loaded. Call a from_osm_* method first.")
         return self._data
 
-    # ── Preprocesado ──────────────────────────────────────────────────────────
+    # ── Pre-processing ────────────────────────────────────────────────────────
 
     def assign_quality(
-        self, quality_func: Callable, column_name: str = "poi_quality"
+        self,
+        quality_func: Callable,
+        column_name: str = "poi_quality",
     ) -> "PointsOfInterest":
-        """Asigna calidad con una función personalizada ``f(gdf) → Series``."""
+        """
+        Assign a quality score using a custom function ``f(gdf) → Series``.
+
+        The function receives the POI GeoDataFrame and must return a
+        Series / array of float values in [0, 1].
+        """
         self._data = self._data.copy()
         self._data[column_name] = quality_func(self._data)
         self.quality_column = column_name
         return self
 
     def assign_quality_by_area(
-        self, area_steps, large_is_better=True, column_name="poi_quality"
+        self,
+        area_steps: List[float],
+        large_is_better: bool = True,
+        column_name: str = "poi_quality",
     ) -> "PointsOfInterest":
-        """Asigna calidad [0,1] según área de la geometría."""
+        """Assign a quality score in [0, 1] based on the geometry area."""
         self._data = self._data.copy()
         self._data[column_name] = poi_utils.quality_by_area(
             self._data, area_steps, large_is_better=large_is_better
@@ -840,9 +881,12 @@ class PointsOfInterest:
         return self
 
     def assign_quality_by_values(
-        self, column, value_priority, quality_column_name="poi_quality"
+        self,
+        column: str,
+        value_priority: List,
+        quality_column_name: str = "poi_quality",
     ) -> "PointsOfInterest":
-        """Asigna calidad [0,1] según orden de prioridad de valores categóricos."""
+        """Assign a quality score in [0, 1] based on a categorical priority list."""
         self._data = self._data.copy()
         self._data[quality_column_name] = poi_utils.quality_by_values(
             self._data[column], value_priority
@@ -851,20 +895,30 @@ class PointsOfInterest:
         return self
 
     def to_points(self, street_edges: gpd.GeoDataFrame) -> "PointsOfInterest":
-        """Convierte polígonos a puntos proyectados en la red de calles."""
+        """Convert polygon POIs to points projected onto the street network."""
         return PointsOfInterest(
             data=poi_utils.polygons_to_points(self._data, street_edges),
             quality_column=self.quality_column,
         )
 
-    def clip(self, aoi) -> "PointsOfInterest":
-        aoi_gdf = aoi.data if isinstance(aoi, AreaOfInterest) else aoi
-        clipped = self._data[
-            self._data.to_crs(aoi_gdf.crs).intersects(aoi_gdf.union_all())
-        ]
-        return PointsOfInterest(data=clipped, quality_column=self.quality_column)
+    def clip(self, aoi: Union[AreaOfInterest, gpd.GeoDataFrame]) -> "PointsOfInterest":
+        """Return a new PointsOfInterest clipped to *aoi*."""
+        aoi_gdf = _bounds_from(aoi)
+        return PointsOfInterest(
+            data=self._data.loc[
+                self._data.to_crs(aoi_gdf.crs).intersects(aoi_gdf.union_all())
+            ],
+            quality_column=self.quality_column,
+        )
 
-    def to_h3(self, resolution, columns=None, method="max", buffer=0.0) -> "H3Grid":
+    def to_h3(
+        self,
+        resolution: int,
+        columns: Optional[List[str]] = None,
+        method: Union[str, Dict[str, str]] = "max",
+        buffer: float = 0.0,
+    ) -> "H3Grid":
+        """Rasterise the POIs into an H3 grid."""
         cols = columns or ([self.quality_column] if self.quality_column else [])
         df = h3_utils.from_gdf(
             self._data, resolution=resolution, columns=cols,
@@ -872,17 +926,24 @@ class PointsOfInterest:
         )
         return H3Grid(data=df, resolution=resolution)
 
-    def plot(self, aoi=None, column=None, cmap=None, **kwargs):
-        aoi_gdf = aoi.data if isinstance(aoi, AreaOfInterest) else aoi
+    def plot(
+        self,
+        aoi: Optional[Union[AreaOfInterest, gpd.GeoDataFrame]] = None,
+        column: Optional[str] = None,
+        cmap: Optional[str] = None,
+        **kwargs,
+    ):
+        """Interactive Folium map of the POIs."""
         col = column or self.quality_column
         return plot_helpers.general_map(
-            aoi=aoi_gdf, pois=[self._data],
+            aoi=_bounds_from(aoi) if aoi is not None else None,
+            pois=[self._data],
             poi_column=col,
             poi_cmap=cmap or ("viridis" if col else None),
             **kwargs,
         )
 
-    # ── Persistencia ──────────────────────────────────────────────────────────
+    # ── Persistence ───────────────────────────────────────────────────────────
 
     def save(
         self,
@@ -891,16 +952,16 @@ class PointsOfInterest:
         overwrite: bool = True,
     ) -> Path:
         """
-        Guarda los POIs en disco.
+        Save the POIs to disk.
 
         Parameters
         ----------
         path : str | Path
-            Directorio de salida.
+            Output directory.
         fmt : GeoFmt
             "geoparquet" | "fgb" | "gpkg" | "geojson" | "shp".
         overwrite : bool
-            Sobreescribir si existe.
+            Replace an existing directory if True.
 
         Examples
         --------
@@ -919,7 +980,7 @@ class PointsOfInterest:
     @classmethod
     def load(cls, path: Union[str, Path]) -> "PointsOfInterest":
         """
-        Carga un PointsOfInterest desde disco.
+        Load a PointsOfInterest from a directory created by ``save()``.
 
         Examples
         --------
@@ -929,18 +990,16 @@ class PointsOfInterest:
         manifest = _read_manifest(directory)
         _check_class(manifest, "PointsOfInterest")
 
-        gdf = _load_gdf(directory, manifest["pois_file"])
         obj = cls.__new__(cls)
-        obj._data = gdf
+        obj._data = _load_gdf(directory, manifest["pois_file"])
         obj.quality_column = manifest.get("quality_column")
         return obj
 
-    def __len__(self):
-        return len(self._data)
+    def __len__(self) -> int:
+        return len(self._data) if self._data is not None else 0
 
-    def __repr__(self):
-        n = len(self._data) if self._data is not None else 0
-        return f"PointsOfInterest(n={n}, quality_column='{self.quality_column}')"
+    def __repr__(self) -> str:
+        return f"PointsOfInterest(n={len(self)}, quality_column='{self.quality_column}')"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -949,23 +1008,24 @@ class PointsOfInterest:
 
 class H3Grid:
     """
-    Rejilla hexagonal H3 con datos agregados.
+    H3 hexagonal grid with aggregated data.
 
-    El dato en disco es siempre Parquet plano (sin geometría). La geometría
-    hexagonal se reconstruye bajo demanda desde el índice h3_cell, manteniendo
-    el archivo mínimo y directamente consultable con DuckDB / Polars / pandas.
+    Data is always stored on disk as flat Parquet (no geometry). Hexagon
+    geometries are reconstructed on demand from the h3_cell index, keeping
+    the file minimal and directly queryable with DuckDB / Polars / pandas
+    without any geospatial dependencies.
 
     Parameters
     ----------
     data : pd.DataFrame | gpd.GeoDataFrame
-        DataFrame indexado por ``h3_cell`` con los datos de la rejilla.
+        DataFrame indexed by ``h3_cell`` with the grid data.
     resolution : int, optional
-        Resolución H3 de la rejilla.
+        H3 resolution of the grid.
 
-    Persistencia
-    ------------
-    H3Grid usa siempre Parquet (no tiene sentido ofrecer GeoJSON/SHP porque
-    el índice h3_cell ya codifica la geometría de cada hexágono).
+    Persistence
+    -----------
+    H3Grid always uses Parquet. There is no benefit to storing geometry on
+    disk because the h3_cell index already encodes each hexagon's shape.
 
     >>> grid.save("data/berlin_grid")
     >>> grid = H3Grid.load("data/berlin_grid")
@@ -979,11 +1039,19 @@ class H3Grid:
         self._data = data
         self.resolution = resolution
 
-    # ── Constructores ─────────────────────────────────────────────────────────
+    # ── Constructors ──────────────────────────────────────────────────────────
 
     @classmethod
-    def from_gdf(cls, gdf, resolution, columns=None, value_order=None,
-                 buffer=0.0, method="max") -> "H3Grid":
+    def from_gdf(
+        cls,
+        gdf: gpd.GeoDataFrame,
+        resolution: int,
+        columns: Optional[List[str]] = None,
+        value_order: Optional[Union[List, Dict[str, List]]] = None,
+        buffer: float = 0.0,
+        method: Union[str, Dict[str, str]] = "max",
+    ) -> "H3Grid":
+        """Rasterise a GeoDataFrame into an H3 grid."""
         df = h3_utils.from_gdf(
             gdf, resolution=resolution, columns=columns,
             value_order=value_order, buffer=buffer, method=method,
@@ -991,16 +1059,25 @@ class H3Grid:
         return cls(data=df, resolution=resolution)
 
     @classmethod
-    def from_raster(cls, raster, resolution, aoi=None, method="distribute",
-                    nodata=None) -> "H3Grid":
-        if isinstance(aoi, AreaOfInterest):
-            aoi = aoi.data
+    def from_raster(
+        cls,
+        raster,
+        resolution: int,
+        aoi=None,
+        method: Union[str, Dict[str, str]] = "distribute",
+        nodata=None,
+    ) -> "H3Grid":
+        """Rasterise a raster (path or ndarray) into an H3 grid."""
         df = h3_utils.from_raster(
-            raster, aoi=aoi, resolution=resolution, method=method, nodata=nodata
+            raster,
+            aoi=aoi.data if isinstance(aoi, AreaOfInterest) else aoi,
+            resolution=resolution,
+            method=method,
+            nodata=nodata,
         )
         return cls(data=df, resolution=resolution)
 
-    # ── Propiedades ───────────────────────────────────────────────────────────
+    # ── Properties ────────────────────────────────────────────────────────────
 
     @property
     def data(self) -> pd.DataFrame:
@@ -1008,54 +1085,70 @@ class H3Grid:
 
     @property
     def gdf(self) -> gpd.GeoDataFrame:
-        """GeoDataFrame con geometrías hexagonales (conversión lazy)."""
+        """GeoDataFrame with hexagon geometries (lazy conversion)."""
         if isinstance(self._data, gpd.GeoDataFrame) and "geometry" in self._data.columns:
             return self._data
         return h3_utils.to_gdf(self._data)
 
-    # ── Métodos ───────────────────────────────────────────────────────────────
+    # ── Methods ───────────────────────────────────────────────────────────────
 
-    def resample(self, target_resolution, columns=None, method="max") -> "H3Grid":
-        df = h3_utils.resample(self._data, target_resolution, columns=columns, method=method)
-        return H3Grid(data=df, resolution=target_resolution)
-
-    def join(self, other: "H3Grid", how="left") -> "H3Grid":
-        merged = self._data.join(other._data, how=how, rsuffix="_right")
-        return H3Grid(data=merged, resolution=self.resolution)
-
-    def clip(self, aoi) -> "H3Grid":
-        aoi_gdf = aoi.data if isinstance(aoi, AreaOfInterest) else aoi
-        gdf = self.gdf.to_crs(aoi_gdf.crs)
-        mask = gdf.intersects(aoi_gdf.union_all())
-        return H3Grid(data=self._data.loc[mask], resolution=self.resolution)
-
-    def plot(self, column=None, cmap="viridis", aoi=None, **kwargs):
-        aoi_gdf = aoi.data if isinstance(aoi, AreaOfInterest) else aoi
-        return plot_helpers.general_map(
-            aoi=aoi_gdf, gdfs=[self._data], column=column, cmap=cmap, **kwargs
+    def resample(
+        self,
+        target_resolution: int,
+        columns: Optional[List[str]] = None,
+        method: Union[str, Dict[str, str]] = "max",
+    ) -> "H3Grid":
+        """Return a new H3Grid resampled to a coarser resolution."""
+        return H3Grid(
+            data=h3_utils.resample(self._data, target_resolution, columns=columns, method=method),
+            resolution=target_resolution,
         )
 
-    # ── Persistencia ──────────────────────────────────────────────────────────
+    def join(self, other: "H3Grid", how: str = "left") -> "H3Grid":
+        """Join two H3Grid objects on their h3_cell index."""
+        return H3Grid(
+            data=self._data.join(other._data, how=how, rsuffix="_right"),
+            resolution=self.resolution,
+        )
 
-    def save(
+    def clip(self, aoi: Union[AreaOfInterest, gpd.GeoDataFrame]) -> "H3Grid":
+        """Return a new H3Grid clipped to *aoi*."""
+        aoi_gdf = _bounds_from(aoi)
+        mask = self.gdf.to_crs(aoi_gdf.crs).intersects(aoi_gdf.union_all())
+        return H3Grid(data=self._data.loc[mask], resolution=self.resolution)
+
+    def plot(
         self,
-        path: Union[str, Path],
-        overwrite: bool = True,
-    ) -> Path:
-        """
-        Guarda la rejilla H3 como Parquet plano.
+        column: Optional[str] = None,
+        cmap: str = "viridis",
+        aoi: Optional[Union[AreaOfInterest, gpd.GeoDataFrame]] = None,
+        **kwargs,
+    ):
+        """Interactive Folium map of the grid."""
+        return plot_helpers.general_map(
+            aoi=_bounds_from(aoi) if aoi is not None else None,
+            gdfs=[self._data],
+            column=column,
+            cmap=cmap,
+            **kwargs,
+        )
 
-        El formato es siempre Parquet (sin geometría). Esto permite consultas
-        directas con DuckDB/Polars sin dependencias geoespaciales, y hace el
-        archivo 3-5× más pequeño que un GeoJSON equivalente.
-        La geometría se reconstruye al llamar a ``.gdf``.
+    # ── Persistence ───────────────────────────────────────────────────────────
+
+    def save(self, path: Union[str, Path], overwrite: bool = True) -> Path:
+        """
+        Save the H3 grid as flat Parquet.
+
+        The format is always Parquet (no geometry). This enables direct queries
+        with DuckDB / Polars and produces files 3-5× smaller than equivalent
+        GeoJSON. Geometry is reconstructed by calling ``.gdf``.
 
         Parameters
         ----------
         path : str | Path
-            Directorio de salida.
+            Output directory.
         overwrite : bool
-            Sobreescribir si existe.
+            Replace an existing directory if True.
 
         Examples
         --------
@@ -1064,7 +1157,6 @@ class H3Grid:
         """
         directory = _ensure_dir(path, overwrite)
 
-        # Descartar geometría si es GeoDataFrame
         df_to_save = self._data
         if isinstance(df_to_save, gpd.GeoDataFrame):
             df_to_save = pd.DataFrame(df_to_save.drop(columns=df_to_save.geometry.name))
@@ -1080,7 +1172,7 @@ class H3Grid:
     @classmethod
     def load(cls, path: Union[str, Path]) -> "H3Grid":
         """
-        Carga una H3Grid desde disco.
+        Load an H3Grid from a directory created by ``save()``.
 
         Examples
         --------
@@ -1090,18 +1182,17 @@ class H3Grid:
         manifest = _read_manifest(directory)
         _check_class(manifest, "H3Grid")
 
-        df = _load_df(directory, "grid")
         obj = cls.__new__(cls)
-        obj._data = df
+        obj._data = _load_df(directory, "grid")
         obj.resolution = manifest.get("resolution")
         return obj
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._data)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
-            f"H3Grid(cells={len(self._data)}, "
+            f"H3Grid(cells={len(self)}, "
             f"resolution={self.resolution}, "
             f"columns={list(self._data.columns)})"
         )
@@ -1113,88 +1204,137 @@ class H3Grid:
 
 class PopulationLayer:
     """
-    Capa de población (WorldPop o datos propios).
+    Population layer (WorldPop raster or custom data).
 
     Parameters
     ----------
     data : str | ndarray | GeoDataFrame
-        Ruta a raster WorldPop, ndarray, o GeoDataFrame con columna de población.
+        Path to a WorldPop raster, a NumPy array, or a GeoDataFrame with a
+        population column.
     population_column : str, optional
-        Columna de población si ``data`` es un GeoDataFrame.
+        Name of the population column when *data* is a GeoDataFrame.
     aoi : AreaOfInterest | GeoDataFrame, optional
-        AOI para recorte.
+        AOI used for clipping.
 
-    Persistencia
-    ------------
-    Si ``data`` es GeoDataFrame → se guarda en el formato elegido.
-    Si ``data`` es ruta a raster → se guarda la ruta en el manifest
-    (usa ``copy_raster=True`` para copiar el archivo).
-    Si ``data`` es ndarray → usa ``copy_raster=True`` (guarda como .npy).
+    Persistence
+    -----------
+    - GeoDataFrame → saved in the chosen geodata format.
+    - Raster path  → the path is stored in the manifest (set ``copy_raster=True``
+      to copy the file into the persistence directory).
+    - ndarray      → saved as ``.npy`` (requires ``copy_raster=True``).
 
     >>> pop.save("data/berlin_pop")
     >>> pop.save("data/berlin_pop", fmt="gpkg", copy_raster=True)
     >>> pop = PopulationLayer.load("data/berlin_pop")
     """
 
-    def __init__(self, data, population_column=None, aoi=None):
+    def __init__(
+        self,
+        data,
+        population_column: Optional[str] = None,
+        aoi: Optional[Union[AreaOfInterest, gpd.GeoDataFrame]] = None,
+    ):
         self._data = data
         self.population_column = population_column
-        self._aoi = aoi.data if isinstance(aoi, AreaOfInterest) else aoi
+        self._aoi = _bounds_from(aoi) if aoi is not None else None
         self._transform = None
         self._crs = None
 
+    # ── Alternative constructor ───────────────────────────────────────────────
+
     @classmethod
-    def from_worldpop(cls, aoi, year: int, folder=None,
-                      resolution="100m") -> "PopulationLayer":
-        """Descarga el raster WorldPop para el AOI y año dados."""
+    def from_worldpop(
+        cls,
+        aoi: Union[AreaOfInterest, gpd.GeoDataFrame],
+        year: int,
+        folder: Optional[str] = None,
+        resolution: str = "100m",
+    ) -> "PopulationLayer":
+        """Download the WorldPop raster for the given AOI and year."""
         from datetime import datetime
-        aoi_gdf = aoi.data if isinstance(aoi, AreaOfInterest) else aoi
         path = pop_module.download_worldpop_population(
-            aoi_gdf, date=datetime(year=year, month=1, day=1),
-            folder=folder, resolution=resolution,
+            _bounds_from(aoi),
+            date=datetime(year=year, month=1, day=1),
+            folder=folder,
+            resolution=resolution,
         )
         return cls(data=path, aoi=aoi)
+
+    # ── Property ──────────────────────────────────────────────────────────────
 
     @property
     def data(self):
         return self._data
 
-    def filter_by_streets(self, network, street_buffer=50,
-                           min_population=0, scale=True) -> "PopulationLayer":
+    # ── Methods ───────────────────────────────────────────────────────────────
+
+    def filter_by_streets(
+        self,
+        network: StreetNetwork,
+        street_buffer: float = 50,
+        min_population: float = 0,
+        scale: bool = True,
+    ) -> "PopulationLayer":
+        """Filter population to areas adjacent to the street network."""
         result = pop_module.filter_population_by_streets(
-            streets_gdf=network.edges, population=self._data,
-            street_buffer=street_buffer, aoi=self._aoi,
-            transform=self._transform, crs=self._crs,
-            min_population=min_population, scale=scale,
+            streets_gdf=network.edges,
+            population=self._data,
+            street_buffer=street_buffer,
+            aoi=self._aoi,
+            transform=self._transform,
+            crs=self._crs,
+            min_population=min_population,
+            scale=scale,
             population_column=self.population_column or "population",
         )
-        return PopulationLayer(
-            data=result, population_column=self.population_column, aoi=self._aoi
-        )
+        return PopulationLayer(data=result, population_column=self.population_column, aoi=self._aoi)
 
-    def density(self, buffer=0, return_raster=False, min_value=0):
+    def density(
+        self,
+        buffer: float = 0,
+        return_raster: bool = False,
+        min_value: float = 0,
+    ):
+        """Compute population density with optional spatial smoothing."""
         return pop_module.density(
-            population_data=self._data, aoi=self._aoi, buffer=buffer,
-            population_column=self.population_column, min_value=min_value,
-            transform=self._transform, crs=self._crs, return_raster=return_raster,
+            population_data=self._data,
+            aoi=self._aoi,
+            buffer=buffer,
+            population_column=self.population_column,
+            min_value=min_value,
+            transform=self._transform,
+            crs=self._crs,
+            return_raster=return_raster,
         )
 
-    def to_h3(self, resolution, method="distribute") -> "H3Grid":
-        df = h3_utils.from_raster(
-            self._data, aoi=self._aoi, resolution=resolution, method=method
+    def to_h3(self, resolution: int, method: str = "distribute") -> "H3Grid":
+        """Aggregate the population layer into an H3 grid."""
+        return H3Grid(
+            data=h3_utils.from_raster(
+                self._data, aoi=self._aoi, resolution=resolution, method=method
+            ),
+            resolution=resolution,
         )
-        return H3Grid(data=df, resolution=resolution)
 
-    def plot(self, column=None, cmap="YlOrRd", aoi=None, **kwargs):
+    def plot(
+        self,
+        column: Optional[str] = None,
+        cmap: str = "YlOrRd",
+        aoi: Optional[Union[AreaOfInterest, gpd.GeoDataFrame]] = None,
+        **kwargs,
+    ):
+        """Interactive Folium map (only available when data is a GeoDataFrame)."""
         if not isinstance(self._data, gpd.GeoDataFrame):
-            raise TypeError("plot() solo disponible cuando data es GeoDataFrame.")
-        aoi_gdf = aoi.data if isinstance(aoi, AreaOfInterest) else aoi
+            raise TypeError("plot() is only available when data is a GeoDataFrame.")
         return plot_helpers.general_map(
-            aoi=aoi_gdf, gdfs=[self._data],
-            column=column or self.population_column, cmap=cmap, **kwargs,
+            aoi=_bounds_from(aoi) if aoi is not None else None,
+            gdfs=[self._data],
+            column=column or self.population_column,
+            cmap=cmap,
+            **kwargs,
         )
 
-    # ── Persistencia ──────────────────────────────────────────────────────────
+    # ── Persistence ───────────────────────────────────────────────────────────
 
     def save(
         self,
@@ -1204,28 +1344,29 @@ class PopulationLayer:
         copy_raster: bool = False,
     ) -> Path:
         """
-        Guarda la capa de población en disco.
+        Save the population layer to disk.
 
-        Comportamiento según el tipo de ``data``:
-          - GeoDataFrame → geodata en el formato elegido.
-          - ruta str     → referencia en manifest (copia si copy_raster=True).
-          - ndarray      → .npy (solo si copy_raster=True).
+        Behaviour depends on the type of ``data``:
+          - GeoDataFrame → written in the chosen geodata format.
+          - str path     → stored as a reference in the manifest
+                           (copied if ``copy_raster=True``).
+          - ndarray      → saved as ``.npy`` (requires ``copy_raster=True``).
 
         Parameters
         ----------
         path : str | Path
-            Directorio de salida.
+            Output directory.
         fmt : GeoFmt
             "geoparquet" | "fgb" | "gpkg" | "geojson" | "shp".
         overwrite : bool
-            Sobreescribir si existe.
+            Replace an existing directory if True.
         copy_raster : bool
-            Si True, copia el archivo raster al directorio de persistencia.
+            Copy the raster file into the persistence directory.
 
         Examples
         --------
         >>> pop.save("data/berlin_pop")                     # GDF → GeoParquet
-        >>> pop.save("data/berlin_pop", copy_raster=True)   # raster → copia
+        >>> pop.save("data/berlin_pop", copy_raster=True)   # raster → copy
         """
         directory = _ensure_dir(path, overwrite)
         meta: dict = {
@@ -1241,8 +1382,7 @@ class PopulationLayer:
         elif isinstance(self._data, str):
             src = Path(self._data)
             if copy_raster:
-                dest = directory / src.name
-                shutil.copy2(src, dest)
+                shutil.copy2(src, directory / src.name)
                 meta["raster_file"] = src.name
                 meta["storage"] = "raster_copy"
             else:
@@ -1251,14 +1391,12 @@ class PopulationLayer:
 
         elif isinstance(self._data, np.ndarray):
             if not copy_raster:
-                raise ValueError(
-                    "Para persistir un ndarray usa copy_raster=True."
-                )
+                raise ValueError("Pass copy_raster=True to persist a NumPy array.")
             np.save(directory / "population_array.npy", self._data)
             meta["storage"] = "ndarray"
 
         else:
-            raise TypeError(f"Tipo de data no persistible: {type(self._data)}")
+            raise TypeError(f"Cannot persist data of type {type(self._data)}")
 
         _write_manifest(directory, "PopulationLayer", meta)
         return directory
@@ -1266,7 +1404,7 @@ class PopulationLayer:
     @classmethod
     def load(cls, path: Union[str, Path]) -> "PopulationLayer":
         """
-        Carga una PopulationLayer desde disco.
+        Load a PopulationLayer from a directory created by ``save()``.
 
         Examples
         --------
@@ -1292,11 +1430,11 @@ class PopulationLayer:
         elif storage == "ndarray":
             obj._data = np.load(directory / "population_array.npy")
         else:
-            raise ValueError(f"storage desconocido: {storage}")
+            raise ValueError(f"Unknown storage type: {storage}")
 
         return obj
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"PopulationLayer("
             f"data_type={type(self._data).__name__}, "
@@ -1310,36 +1448,45 @@ class PopulationLayer:
 
 class AccessibilityAnalyzer:
     """
-    Orquestador de análisis de accesibilidad urbana.
+    Urban accessibility analysis orchestrator.
+
+    Combines a street network and a set of POIs to compute isochrones and
+    accessibility scores.
 
     Parameters
     ----------
     network : StreetNetwork
+        Street network to route on.
     pois : PointsOfInterest
+        Points of interest with assigned quality scores.
     distance_matrix : pd.DataFrame | list
-        Matriz distancia-calidad-accesibilidad o lista de distancias simples.
+        Distance-quality-accessibility matrix or a simple list of distances.
     poi_quality_column : str, optional
+        Quality column in the POI GeoDataFrame.
     min_edge_length : float, optional
+        Minimum edge length (metres) when projecting POIs onto the network.
     max_dist : float, optional
+        Maximum distance (metres) from a POI to the nearest network edge.
 
-    Persistencia
-    ------------
-    Guarda todos los componentes en sub-directorios independientes, lo que
-    permite al backend cargar solo la parte que necesita (p.ej. solo el
-    resultado sin volver a cargar la red original).
+    Persistence
+    -----------
+    Each component is stored in its own sub-directory, allowing the backend
+    to load only the part it needs (e.g. only the result without loading the
+    full input network).
 
-    Estructura:
+    Directory layout::
+
         <path>/
-            manifest.json       → metadatos + distance_matrix serializada
-            network/            → StreetNetwork de entrada
+            manifest.json       → metadata + serialised distance_matrix
+            network/            → input StreetNetwork
             pois/               → PointsOfInterest
-            result_network/     → StreetNetwork resultado (si run() fue llamado)
+            result_network/     → result StreetNetwork (if run() was called)
 
     >>> analyzer.save("data/berlin_analysis")
     >>> analyzer.save("data/berlin_analysis", fmt="fgb")
     >>> analyzer = AccessibilityAnalyzer.load("data/berlin_analysis")
 
-    # Carga solo el resultado sin cargar la red original:
+    # Partial load from a backend (no need to load the full analysis):
     >>> result = StreetNetwork.load("data/berlin_analysis/result_network")
     """
 
@@ -1348,9 +1495,9 @@ class AccessibilityAnalyzer:
         network: StreetNetwork,
         pois: PointsOfInterest,
         distance_matrix,
-        poi_quality_column=None,
-        min_edge_length=0.0,
-        max_dist=None,
+        poi_quality_column: Optional[str] = None,
+        min_edge_length: float = 0.0,
+        max_dist: Optional[float] = None,
     ):
         self.network = network
         self.pois = pois
@@ -1361,13 +1508,20 @@ class AccessibilityAnalyzer:
         self._result_network: Optional[StreetNetwork] = None
         self._points_with_osmid: Optional[gpd.GeoDataFrame] = None
 
-    # ── Ejecución ─────────────────────────────────────────────────────────────
+    # ── Execution ─────────────────────────────────────────────────────────────
 
-    def run(self, verbose=True) -> StreetNetwork:
-        """Calcula isocronas de accesibilidad sobre la red."""
-        pts = self.pois.data.copy()
+    def run(self, verbose: bool = True) -> StreetNetwork:
+        """
+        Compute accessibility isochrones on the street network.
+
+        Returns
+        -------
+        StreetNetwork
+            Network annotated with an ``accessibility`` column on nodes and edges.
+        """
         result = isochrones.graph(
-            self.network.graph, pts,
+            self.network.graph,
+            self.pois.data.copy(),
             distance_matrix=self.distance_matrix,
             poi_quality_col=self.poi_quality_column,
             min_edge_length=self.min_edge_length,
@@ -1384,8 +1538,12 @@ class AccessibilityAnalyzer:
         )
         return self._result_network
 
-    def run_buffers(self, accessibility_values=None, verbose=True) -> gpd.GeoDataFrame:
-        """Calcula isocronas como buffers euclídeos (sin red de calles)."""
+    def run_buffers(
+        self,
+        accessibility_values: Optional[list] = None,
+        verbose: bool = True,
+    ) -> gpd.GeoDataFrame:
+        """Compute accessibility as Euclidean buffers (no street routing)."""
         return isochrones.buffers(
             service_geoms=self.pois.data,
             distance_matrix=self.distance_matrix,
@@ -1395,57 +1553,80 @@ class AccessibilityAnalyzer:
         )
 
     def default_distance_matrix(self) -> pd.DataFrame:
+        """Build a default distance matrix from the POI quality scores."""
         if self.poi_quality_column is None:
-            raise ValueError("Se necesita quality_column en los POIs.")
+            raise ValueError("quality_column is required on the POIs.")
         dm, _ = isochrones.default_distance_matrix(
             self.pois.data,
             distance_steps=(
-                self.distance_matrix if isinstance(self.distance_matrix, list)
+                self.distance_matrix
+                if isinstance(self.distance_matrix, list)
                 else list(self.distance_matrix.columns[:-1])
             ),
             poi_quality_column=self.poi_quality_column,
         )
         return dm
 
-    # ── Resultados ────────────────────────────────────────────────────────────
+    # ── Result properties ─────────────────────────────────────────────────────
 
     @property
     def result_network(self) -> Optional[StreetNetwork]:
+        """Result StreetNetwork after calling ``run()``."""
         return self._result_network
 
     @property
     def result_nodes(self) -> Optional[gpd.GeoDataFrame]:
+        """Node GeoDataFrame with ``accessibility`` column."""
         return self._result_network.nodes if self._result_network else None
 
     @property
     def result_edges(self) -> Optional[gpd.GeoDataFrame]:
+        """Edge GeoDataFrame with ``accessibility`` column."""
         return self._result_network.edges if self._result_network else None
 
-    def to_h3(self, resolution, column="accessibility", method="max") -> H3Grid:
+    def to_h3(
+        self,
+        resolution: int,
+        column: str = "accessibility",
+        method: str = "max",
+    ) -> H3Grid:
+        """Aggregate the accessibility result into an H3 grid."""
         if self._result_network is None:
-            raise RuntimeError("Ejecuta run() antes de llamar a to_h3().")
+            raise RuntimeError("Call run() before to_h3().")
         edges = self._result_network.edges
         if column not in edges.columns:
-            raise ValueError(f"Columna '{column}' no encontrada en las aristas.")
-        df = h3_utils.from_gdf(
-            edges[[column, "geometry"]], resolution=resolution,
-            columns=[column], method=method,
+            raise ValueError(f"Column '{column}' not found in result edges.")
+        return H3Grid(
+            data=h3_utils.from_gdf(
+                edges[[column, "geometry"]],
+                resolution=resolution,
+                columns=[column],
+                method=method,
+            ),
+            resolution=resolution,
         )
-        return H3Grid(data=df, resolution=resolution)
 
-    def plot(self, column="accessibility", cmap="RdYlGn", aoi=None,
-             show_pois=True, **kwargs):
+    def plot(
+        self,
+        column: str = "accessibility",
+        cmap: str = "RdYlGn",
+        aoi: Optional[Union[AreaOfInterest, gpd.GeoDataFrame]] = None,
+        show_pois: bool = True,
+        **kwargs,
+    ):
+        """Interactive Folium map of the accessibility result."""
         if self._result_network is None:
-            raise RuntimeError("Ejecuta run() antes de plotear.")
-        aoi_gdf = aoi.data if isinstance(aoi, AreaOfInterest) else aoi
+            raise RuntimeError("Call run() before plot().")
         return plot_helpers.general_map(
-            aoi=aoi_gdf, gdfs=[self._result_network.edges],
-            column=column, cmap=cmap,
+            aoi=_bounds_from(aoi) if aoi is not None else None,
+            gdfs=[self._result_network.edges],
+            column=column,
+            cmap=cmap,
             pois=[self.pois.data] if show_pois else [],
             **kwargs,
         )
 
-    # ── Persistencia ──────────────────────────────────────────────────────────
+    # ── Persistence ───────────────────────────────────────────────────────────
 
     def save(
         self,
@@ -1454,26 +1635,26 @@ class AccessibilityAnalyzer:
         overwrite: bool = True,
     ) -> Path:
         """
-        Guarda el análisis completo en disco.
+        Save the full analysis to disk.
 
-        Cada componente se guarda en su propio sub-directorio, permitiendo
-        carga independiente desde el backend sin cargar el análisis entero.
+        Each component is written to its own sub-directory, enabling partial
+        loads from the backend without reading the entire analysis into memory.
 
         Parameters
         ----------
         path : str | Path
-            Directorio raíz de salida.
+            Root output directory.
         fmt : GeoFmt
-            Formato aplicado a todos los componentes geodata.
+            Format applied to all geodata components.
         overwrite : bool
-            Sobreescribir si existe.
+            Replace an existing directory if True.
 
         Examples
         --------
         >>> analyzer.save("data/berlin_analysis")
         >>> analyzer.save("data/berlin_analysis", fmt="fgb")
 
-        # Carga parcial desde backend:
+        # Partial load from a backend:
         >>> result = StreetNetwork.load("data/berlin_analysis/result_network")
         """
         directory = _ensure_dir(path, overwrite)
@@ -1485,9 +1666,8 @@ class AccessibilityAnalyzer:
         if has_result:
             self._result_network.save(directory / "result_network", fmt=fmt, overwrite=True)
 
-        # Serializar distance_matrix
         if isinstance(self.distance_matrix, list):
-            dm_serial = {"type": "list", "values": self.distance_matrix}
+            dm_serial: dict = {"type": "list", "values": self.distance_matrix}
         elif isinstance(self.distance_matrix, pd.DataFrame):
             dm_serial = {
                 "type": "dataframe",
@@ -1509,12 +1689,12 @@ class AccessibilityAnalyzer:
     @classmethod
     def load(cls, path: Union[str, Path]) -> "AccessibilityAnalyzer":
         """
-        Carga un AccessibilityAnalyzer desde disco.
+        Load an AccessibilityAnalyzer from a directory created by ``save()``.
 
         Parameters
         ----------
         path : str | Path
-            Directorio generado por ``save()``.
+            Directory generated by ``save()``.
 
         Examples
         --------
@@ -1523,9 +1703,6 @@ class AccessibilityAnalyzer:
         directory = Path(path)
         manifest = _read_manifest(directory)
         _check_class(manifest, "AccessibilityAnalyzer")
-
-        network = StreetNetwork.load(directory / "network")
-        pois = PointsOfInterest.load(directory / "pois")
 
         dm_serial = manifest.get("distance_matrix", {})
         if dm_serial.get("type") == "list":
@@ -1536,8 +1713,8 @@ class AccessibilityAnalyzer:
             distance_matrix = dm_serial.get("values")
 
         obj = cls.__new__(cls)
-        obj.network = network
-        obj.pois = pois
+        obj.network = StreetNetwork.load(directory / "network")
+        obj.pois = PointsOfInterest.load(directory / "pois")
         obj.distance_matrix = distance_matrix
         obj.poi_quality_column = manifest.get("poi_quality_column")
         obj.min_edge_length = manifest.get("min_edge_length", 0.0)
@@ -1549,7 +1726,7 @@ class AccessibilityAnalyzer:
         )
         return obj
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"AccessibilityAnalyzer("
             f"pois={len(self.pois)}, "
