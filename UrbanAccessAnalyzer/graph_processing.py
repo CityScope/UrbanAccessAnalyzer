@@ -16,6 +16,30 @@ from pathlib import Path
 "TODO: node elevations does not work"
 
 
+def crop_by_aoi(aoi,G=None,nodes=None,edges=None):
+    if G is not None:
+        nodes,edges = ox.graph_to_gdfs(G)
+
+    edges = edges.to_crs(edges.estimate_utm_crs()) 
+    nodes = nodes.to_crs(edges.crs)
+    edges = edges[
+        edges.intersects(
+            aoi.to_crs(edges.crs).union_all()
+        )
+    ]
+    nodes = nodes[
+        nodes.index.isin(
+            edges.reset_index()['u']
+        ) | nodes.index.isin(
+            edges.reset_index()['v']
+        )
+    ]
+    if G is not None:
+        G = ox.graph_from_gdfs(nodes,edges, graph_attrs=G.graph)
+        return G 
+    else:
+        return nodes,edges
+
 def add_node_elevations_open_api(G):
     orig_template = ox.settings.elevation_url_template
     ox.settings.elevation_url_template = (

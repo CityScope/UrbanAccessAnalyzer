@@ -7,21 +7,156 @@ import geopandas as gpd
 import shapely
 from shapely.geometry import box
 from pyproj import Geod
+from pathlib import Path
+import geopandas as gpd
+from shapely.geometry import box
+import pyogrio
 
-geod_wgs84 = Geod(ellps="WGS84")
+def read_geofile(path, bounds=None):
+    def _normalize_bounds(bounds):
+        if bounds is None:
+            return bounds
 
-def geodesic_area(geom,geod=geod_wgs84) -> float:
+        # shapely geometry
+        if isinstance(bounds, shapely.geometry.base.BaseGeometry):
+            return gpd.GeoSeries([bounds], crs="EPSG:4326")
+
+        # bbox list [xmin, ymin, xmax, ymax]
+        if isinstance(bounds, (list, tuple)) and len(bounds) == 4:
+            return gpd.GeoSeries([box(*bounds)], crs="EPSG:4326")
+
+        if isinstance(bounds, gpd.GeoDataFrame):
+            return bounds.geometry
+                
+        return bounds 
+    
+    path = Path(path)
+
+    # Fastest → slowest
+    priority_exts = [
+        ".geoparquet",
+        ".parquet",
+        ".fgb",
+        ".gpkg",
+        ".shp",
+        ".geojson",
+        ".json",
+        ".gml",
+        ".kml",
+        ".kmz",
+        ".tab",
+        ".mif", ".mid",
+        ".dxf",
+        ".vrt",
+    ]
+
+    bounds_gs = _normalize_bounds(bounds)
+
+    # Build candidates
+    if path.suffix:
+        base = path.with_suffix("")
+        candidates = [base.with_suffix(ext) for ext in priority_exts]
+
+        if base.parent.exists():
+            for p in base.parent.glob(base.name + ".*"):
+                if p.suffix not in priority_exts:
+                    candidates.append(p)
+    else:
+        candidates = list(path.parent.glob(path.name + ".*"))
+
+        def ext_priority(p):
+            try:
+                return priority_exts.index(p.suffix)
+            except ValueError:
+                return len(priority_exts)
+
+        candidates = sorted(candidates, key=ext_priority)
+
+    # Try loading
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+
+        try:
+            suffix = candidate.suffix.lower()
+
+            # --- GEOPARQUET / PARQUET ---
+            if suffix in [".geoparquet", ".parquet"]:
+
+                bbox = None
+                if bounds_gs is not None:
+                    # First read metadata only (cheap)
+                    gdf_meta = gpd.read_parquet(candidate, columns=[])
+
+                    if gdf_meta.crs is None:
+                        raise ValueError("No CRS in GeoParquet")
+                    
+                    bounds_proj = bounds_gs.to_crs(gdf_meta.crs)
+                    bbox = tuple(bounds_proj.total_bounds)
+
+                # Now read with bbox pushdown
+                gdf = gpd.read_parquet(candidate, bbox=bbox)
+
+                if gdf.geometry is None or gdf.crs is None:
+                    raise ValueError("Invalid GeoParquet")
+
+                if bbox is not None:
+                    gdf = gdf[
+                        gdf.intersects(bounds_proj.union_all())
+                    ]
+
+                return gdf
+
+            # --- OTHER FORMATS via pyogrio ---
+            else:
+                bbox = None
+                if bounds_gs is not None:
+                    info = pyogrio.read_info(candidate)
+
+                    if info["crs"] is None:
+                        raise ValueError("No CRS in file")
+
+                    if info["geometry_type"] is None:
+                        raise ValueError("No geometry column")
+
+                    bounds_proj = bounds_gs.to_crs(info["crs"])
+                    bbox = tuple(bounds_proj.total_bounds)
+
+                gdf = gpd.read_file(
+                    candidate,
+                    engine="pyogrio",
+                    use_arrow=True,
+                    bbox=bbox,
+                )
+
+                if gdf.crs is None or gdf.geometry is None:
+                    raise ValueError("Invalid geodataframe")
+                
+                if bbox is not None:
+                    gdf = gdf[
+                        gdf.intersects(bounds_proj.union_all())
+                    ]
+
+                return gdf
+
+        except Exception:
+            continue
+
+    raise FileNotFoundError(f"No valid geofile found for base path: {path}")
+
+
+def geodesic_area(geom,geod=Geod(ellps="WGS84")) -> float:
     if geom is None or geom.is_empty:
         return 0.0
 
     # Handle polygons & multipolygons
     if geom.geom_type == "Polygon":
-        area, _ = geod_wgs84.geometry_area_perimeter(geom)
+        area, _ = geod.geometry_area_perimeter(geom)
         return abs(area)
 
     if geom.geom_type == "MultiPolygon":
         return sum(
-            abs(geod_wgs84.geometry_area_perimeter(p)[0])
+            abs(geod.geometry_area_perimeter(p)[0])
             for p in geom.geoms
         )
 
@@ -54,6 +189,22 @@ def is_utm_reasonable(gdf: gpd.GeoDataFrame,
     _, _, height_m = geod.inv(minx, miny, minx, maxy)
 
     return width_m <= max_width_m and height_m <= max_height_m
+
+def area(
+    gdf: gpd.GeoDataFrame,
+    max_width_m: float = 750_000,
+    max_height_m: float = 2_000_000,
+    ellps=None,
+    geod=Geod(ellps="WGS84")
+):
+    if is_utm_reasonable(gdf,max_width_m,max_height_m,ellps):
+        if gdf.crs.is_projected:
+            return gdf.geometry.area
+        else:
+            return gdf.geometry.to_crs(gdf.estimate_utm_crs()).area
+    else:
+        return gdf.to_crs(4326).geometry.map(lambda geom: geodesic_area(geom,geod=geod))
+
 
 def intersects_all_with_all(
     G: gpd.GeoDataFrame | gpd.GeoSeries, g: gpd.GeoDataFrame | gpd.GeoSeries
@@ -305,7 +456,7 @@ def aggregate(
     value_order: Union[List, Dict[str, List]] = None,
     method: Union[str, Dict[str, str]] = "max",
     id_column: Optional[str] = None,
-) -> pd.DataFrame:
+) -> gpd.GeoDataFrame:
     """
     Aggregate attribute values by identifier after exploding list-valued
     spatial relationships.
@@ -515,7 +666,7 @@ def resample_gdf(
     ] = "center_overlap",
     method: Union[str, Dict[str, str]] = "max",
     id_column: str | None = None,
-) -> pd.DataFrame:
+) -> gpd.GeoDataFrame:
     """
     Spatially resample attributes from a source GeoDataFrame onto a destination
     geometry layer.
