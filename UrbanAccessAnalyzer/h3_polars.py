@@ -41,6 +41,7 @@ GEOMETRY_COLLECTION_TYPE: str = "GeometryCollection"
 def cells_in_geometry(
     gdf: Union[pl.DataFrame, pl.LazyFrame],
     resolution: int,
+    buffer: float = 0.0,
     contain: Literal[
         "center",
         "full",

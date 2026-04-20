@@ -595,7 +595,7 @@ def aggregate(
             agg_dict[col] = "sum"
         elif m == "density":
             if not isinstance(df, gpd.GeoDataFrame):
-                raise Exception("method 'density' requires h3_df to be a GeoDataFrame.")
+                raise Exception("method 'density' requires df to be a GeoDataFrame.")
 
             if df.crs and df.crs.is_geographic:
                 df = df.to_crs(df.estimate_utm_crs())
