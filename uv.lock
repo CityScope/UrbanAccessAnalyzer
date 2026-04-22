@@ -405,6 +405,15 @@ wheels = [
 ]
 
 [[package]]
+name = "dill"
+version = "0.4.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/e1/56027a71e31b02ddc53c7d65b01e68edf64dea2932122fe7746a516f75d5/dill-0.4.1.tar.gz", hash = "sha256:423092df4182177d4d8ba8290c8a5b640c66ab35ec7da59ccfa00f6fa3eea5fa", size = 187315, upload-time = "2026-01-19T02:36:56.85Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1e/77/dc8c558f7593132cf8fefec57c4f60c83b16941c574ac5f619abb3ae7933/dill-0.4.1-py3-none-any.whl", hash = "sha256:1e1ce33e978ae97fcfcff5638477032b801c46c7c65cf717f95fbc2248f79a9d", size = 120019, upload-time = "2026-01-19T02:36:55.663Z" },
+]
+
+[[package]]
 name = "distlib"
 version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2753,6 +2762,7 @@ name = "urbanaccessanalyzer"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [
+    { name = "dill" },
     { name = "geopandas" },
     { name = "geopy" },
     { name = "networkx" },
@@ -2762,7 +2772,6 @@ dependencies = [
     { name = "polars" },
     { name = "pyarrow" },
     { name = "pycountry" },
-    { name = "pygris" },
     { name = "rapidfuzz" },
     { name = "rasterio", version = "1.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "rasterio", version = "1.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -2771,10 +2780,13 @@ dependencies = [
     { name = "scikit-learn" },
     { name = "shapely" },
     { name = "tqdm" },
-    { name = "us" },
 ]
 
 [package.optional-dependencies]
+census = [
+    { name = "pygris" },
+    { name = "us" },
+]
 dev = [
     { name = "black" },
     { name = "pre-commit" },
@@ -2809,6 +2821,7 @@ plot = [
 requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=24.8.0" },
     { name = "contextily", marker = "extra == 'plot'", specifier = ">=1.6.0" },
+    { name = "dill", specifier = ">=0.4.1" },
     { name = "folium", marker = "extra == 'plot'", specifier = ">=0.20.0" },
     { name = "furo", marker = "extra == 'docs'", specifier = ">=2024.8.0" },
     { name = "geopandas", specifier = ">=1.0.0" },
@@ -2828,7 +2841,7 @@ requires-dist = [
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.2.0" },
     { name = "pyarrow", specifier = ">=18.0.0" },
     { name = "pycountry", specifier = ">=24.6.1" },
-    { name = "pygris", specifier = ">=0.2.1" },
+    { name = "pygris", marker = "extra == 'census'", specifier = ">=0.2.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "rapidfuzz", specifier = ">=3.13.0" },
     { name = "rasterio", specifier = ">=1.4.3" },
@@ -2842,9 +2855,9 @@ requires-dist = [
     { name = "streamlit", marker = "extra == 'plot'", specifier = ">=1.50.0" },
     { name = "streamlit-folium", marker = "extra == 'plot'", specifier = ">=0.25.3" },
     { name = "tqdm", specifier = ">=4.0.0" },
-    { name = "us", specifier = ">=3.2.0" },
+    { name = "us", marker = "extra == 'census'", specifier = ">=3.2.0" },
 ]
-provides-extras = ["osm", "h3", "plot", "dev", "docs"]
+provides-extras = ["osm", "h3", "plot", "census", "dev", "docs"]
 
 [[package]]
 name = "urllib3"

@@ -197,11 +197,13 @@ def area(
     ellps=None,
     geod=Geod(ellps="WGS84")
 ):
+    if gdf.crs.is_projected:
+        return gdf.geometry.area
+    else:
+        gdf = gdf.to_crs(4326)
+        
     if is_utm_reasonable(gdf,max_width_m,max_height_m,ellps):
-        if gdf.crs.is_projected:
-            return gdf.geometry.area
-        else:
-            return gdf.geometry.to_crs(gdf.estimate_utm_crs()).area
+        return gdf.geometry.to_crs(gdf.estimate_utm_crs()).area
     else:
         return gdf.to_crs(4326).geometry.map(lambda geom: geodesic_area(geom,geod=geod))
 
@@ -441,7 +443,8 @@ def source_ids_to_dst_geometry(
     result = (
         joined.groupby("index_right")[_id_column]
         .apply(list)
-        .reindex(dst_gdf.index, fill_value=[])
+        .reindex(dst_gdf.index)
+        .apply(lambda x: x if isinstance(x, list) else [])
     )
 
     dst_gdf[id_column] = result.values

@@ -134,6 +134,82 @@ def quality_by_area(gdf: gpd.GeoDataFrame | gpd.GeoSeries, area_steps: list[floa
     gdf['_poi_quality'] = gdf['_poi_quality'].round(3)
     return list(gdf['_poi_quality'])
 
+def score_by_values(values: list | pd.Series, value_priority: list):
+    # Convert values to list while preserving None/np.nan
+    values = pd.Series(values)
+    str_values = values.astype(str).where(~values.isna(), None)
+
+    if len(value_priority) == 0:
+        raise Exception("No values in value_priority")
+
+    if len(values) == 0:
+        return []
+
+    # Check for duplicates in priority list
+    if len(set(value_priority)) != len(value_priority):
+        raise Exception("value_priority has to have unique values")
+
+    # Check for None or NaN in priority list
+    if any(pd.isna(x) for x in value_priority):
+        raise Exception("value_priority has None or NaN")
+
+    # Convert priority list to strings for matching
+    value_priority_str = [str(x) for x in value_priority]
+
+    # Warn about mismatches
+    unique_values = set(str_values.dropna().unique())
+    not_in_values = set(value_priority_str) - unique_values
+    if not_in_values:
+        warnings.warn(
+            f"Values {not_in_values} in value_priority are not in the input values"
+        )
+
+    not_in_priority = unique_values - set(value_priority_str)
+    if not_in_priority:
+        warnings.warn(
+            f"Values {not_in_priority} in input values are not in value_priority. They will be set to None."
+        )
+
+    # Create mapping from value to priority index (starting at 1)
+    value_to_priority = {val: i + 1 for i, val in enumerate(value_priority_str)}
+
+    # Map values to priorities
+    result = str_values.map(value_to_priority)
+    result = result[::-1]
+    result /= np.max(result)
+    result = np.round(result, 3)
+
+    return result.tolist()
+
+
+def score_by_area(gdf: gpd.GeoDataFrame | gpd.GeoSeries, area_steps: list[float], large_is_better:bool=True):
+    """
+    Classify geometries by area thresholds defined in area_steps.
+
+    Parameters:
+        gdf (GeoDataFrame or GeoSeries): Input geometries.
+        area_steps (list): List of area breakpoints. Must be sorted (asc or desc).
+
+    Returns:
+        list: A list of class numbers corresponding to area bins.
+    """
+    # Create the area column
+    gdf = gdf.copy()
+    gdf = gdf.to_crs(gdf.estimate_utm_crs())
+    gdf['area'] = gdf.geometry.area 
+    area_steps = np.unique(area_steps)
+
+    for i in range(len(area_steps)):
+        j = len(area_steps) - i - 1
+        if large_is_better:
+            gdf.loc[gdf.geometry.area > area_steps[i], '_poi_quality'] = j + 1
+        else:
+            gdf.loc[gdf.geometry.area > area_steps[j], '_poi_quality'] = i + 1
+            
+    gdf['_poi_quality'] = list(gdf['_poi_quality'].max() + 1 - gdf['_poi_quality'])
+    gdf['_poi_quality'] = list(gdf['_poi_quality'] / gdf['_poi_quality'].max())
+    gdf['_poi_quality'] = gdf['_poi_quality'].round(3)
+    return list(gdf['_poi_quality'])
 
 def polygons_to_points(poi, street_edges):
     poi_points = poi.copy()

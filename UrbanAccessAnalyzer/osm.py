@@ -367,7 +367,7 @@ def download_street_graph(
         bounds.to_crs(4326).union_all(),
         network_type=network_type,
         simplify=True,
-        retain_all=False,
+        retain_all=True,
         truncate_by_edge=True,
         custom_filter=custom_filter,
     )

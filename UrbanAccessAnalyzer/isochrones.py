@@ -628,7 +628,7 @@ def graph(
 
 
 def buffers(
-    service_geoms, distance_matrix, accessibility_values, poi_quality_col, verbose:bool=True
+    service_geoms, distance_matrix, poi_quality_col, accessibility_values=None, verbose:bool=True
 ):
     service_geoms = service_geoms.copy()
     if service_geoms.crs.is_geographic:

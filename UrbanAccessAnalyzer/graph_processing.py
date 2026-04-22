@@ -7,7 +7,6 @@ from shapely.geometry import Point
 import numpy as np
 from sklearn.cluster import AgglomerativeClustering
 from . import osm 
-from . import configs 
 import os 
 import warnings
 from pathlib import Path
@@ -1482,7 +1481,7 @@ def isochrone(
 #     return result
 
 
-def download_and_create_graph(osm_xml_path,pbf_path=configs.PBF_OSM_PATH,aoi=None,network_filter=None,min_edge_length=0):
+def download_and_create_graph(osm_xml_path,pbf_path,aoi=None,network_filter=None,min_edge_length=0):
     if not os.path.isfile(osm_xml_path):
         if pbf_path is None:
             raise Exception("You have to provide a 'pbf_path' to donwload pbf street networks and create a xml graph.")
