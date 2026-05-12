@@ -234,7 +234,12 @@ def general_map(
                 radius_values = compute_radius(pd.Series(size_values))
                 
                 # Add legend as a separate HTML overlay
-                legend_html = '<div style="position: fixed; bottom: 50px; left: 50px; z-index:9999; background:white; padding:10px; border-radius:5px; box-shadow: 2px 2px 5px rgba(0,0,0,0.3);">'
+                legend_html = """
+                    <div style="position: fixed; bottom: 40px; right: 40px; z-index:9999; 
+                    background:white; padding:10px; border-radius:5px; 
+                    box-shadow: 2px 2px 5px rgba(0,0,0,0.3);">
+                    <b>Population Legend</b><
+                """
                 legend_html += f'<b>{size_column}</b><br>'
                 for val, r in zip(size_values, radius_values):
                     # Small circle with text
