@@ -2,24 +2,30 @@ import folium
 import pandas as pd
 import geopandas as gpd
 from typing import Optional, List, Union
-from matplotlib import colors, colormaps as mpl_colormaps
-import matplotlib.colors as colors
-from folium.plugins import BeautifyIcon
-import numpy as np 
+from matplotlib import colormaps as mpl_colormaps
+import matplotlib.colors as mcolors
+import numpy as np
 
 from . import h3_utils
+
 
 def general_map(
     m: Optional[folium.Map] = None,
     aoi: Optional[gpd.GeoDataFrame] = None,
     pois: Optional[Union[gpd.GeoDataFrame, List[gpd.GeoDataFrame]]] = None,
-    gdfs: Optional[Union[gpd.GeoDataFrame, pd.DataFrame, List[Union[gpd.GeoDataFrame, pd.DataFrame]]]] = None,
+    gdfs: Optional[
+        Union[
+            gpd.GeoDataFrame,
+            pd.DataFrame,
+            List[Union[gpd.GeoDataFrame, pd.DataFrame]],
+        ]
+    ] = None,
     poi_column: Optional[str] = None,
     poi_color: Optional[str] = None,
     poi_cmap: Optional[str] = None,
     poi_vmin: Optional[float] = None,
     poi_vmax: Optional[float] = None,
-    poi_opacity: float = 1.0,
+    poi_icon_column: Optional[str] = None,
     column: Optional[str] = None,
     color: str = "black",
     cmap: Optional[str] = None,
@@ -27,24 +33,20 @@ def general_map(
     vmax: Optional[float] = None,
     opacity: float = 0.4,
     size_column: Optional[str] = None,
-    zoom_start=11,
+    zoom_start: int = 11,
 ) -> folium.Map:
-    """
-    General-purpose interactive Folium map builder.
 
-    - Supports polygons, lines, points
-    - AOI clipping
-    - Multiple GeoDataFrames
-    - Optional thematic coloring
-    - Optional point-size scaling
-    """
+    # ==========================================================
+    # DEFAULTS
+    # ==========================================================
     if pois is None:
         pois = []
     if gdfs is None:
         gdfs = []
-    # ------------------------------------------------------------------
-    # CRS normalization
-    # ------------------------------------------------------------------
+
+    # ==========================================================
+    # CRS NORMALIZATION
+    # ==========================================================
     if aoi is not None:
         aoi = aoi.to_crs(4326)
 
@@ -53,16 +55,19 @@ def general_map(
         for g in objs:
             if isinstance(g, gpd.GeoDataFrame):
                 g = g.to_crs(4326)
+
             elif (
-                isinstance(g, pd.DataFrame) and 
-                ("h3_cell" in g.columns or ("h3_cell" == g.index.name))
+                isinstance(g, pd.DataFrame)
+                and (("h3_cell" in g.columns) or ("h3_cell" == g.index.name))
             ):
                 g = h3_utils.to_gdf(g).to_crs(4326)
+
             else:
                 raise ValueError("Unsupported GeoDataFrame input")
-            
+
             g = g[g.geometry.is_valid]
             out.append(g)
+
         return out
 
     if not isinstance(gdfs, list):
@@ -73,52 +78,36 @@ def general_map(
         pois = [pois]
     pois = _normalize_gdfs(pois)
 
-    if len(gdfs) == 0 and len(pois) == 0 and (aoi is None):
+    if len(gdfs) == 0 and len(pois) == 0 and aoi is None:
         raise ValueError("Nothing to map")
-    
-    # ------------------------------------------------------------------
-    # Map centering
-    # ------------------------------------------------------------------
-    if aoi is not None:
-        centroid = aoi.union_all().centroid
-    elif pois:
-        centroid = pd.concat([p.geometry for p in pois]).union_all().centroid
-    else:
-        centroid = pd.concat([g.geometry for g in gdfs]).union_all().centroid
 
+    # ==========================================================
+    # CENTER
+    # ==========================================================
+    all_geoms = []
+
+    if aoi is not None:
+        all_geoms.append(aoi.geometry)
+
+    for g in gdfs:
+        all_geoms.append(g.geometry)
+
+    for p in pois:
+        all_geoms.append(p.geometry)
+
+    centroid = pd.concat(all_geoms).union_all().centroid
+
+    # ==========================================================
+    # MAP (TRUE B&W BASEMAP)
+    # ==========================================================
     if m is None:
         m = folium.Map(
             location=[centroid.y, centroid.x],
             zoom_start=zoom_start,
-            tiles="CartoDB positron",
+            tiles="https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png",
+            attr="CartoDB",
+            control_scale=True,
         )
-
-    if aoi is not None:
-        if m is None:
-            m = aoi.explore(
-                color="blue",
-                fill=False,
-                style_kwds={"weight": 4, "dashArray": "5,5", "opacity": 1.0},
-            )
-        else:
-            m = aoi.explore(
-                m=m,
-                color="blue",
-                fill=False,
-                style_kwds={"weight": 4, "dashArray": "5,5", "opacity": 1.0},
-            )
-
-        if len(pois) > 0:
-            pois = [p[p.intersects(aoi.union_all())] for p in pois]
-        if len(gdfs) > 0:
-            gdfs = [g[g.intersects(aoi.union_all())] for g in gdfs]
-    else:
-        m = folium.Map(
-            location=[centroid.y, centroid.x],
-            zoom_start=12,
-            tiles="CartoDB positron",
-        )
-
 
     # ------------------------------------------------------------------
     # Helpers
@@ -140,6 +129,19 @@ def general_map(
         p90 = series.quantile(0.9)
         clipped = series.clip(lower=0, upper=p90)
         return max_radius * clipped / p90 if p90 > 0 else max_radius
+
+    def tooltip_html(row):
+        html = "<table style='width:260px'>"
+        for k, v in row.items():
+            if k != "geometry":
+                html += f"""
+                <tr>
+                    <th style='text-align:left;padding-right:8px'>{k}</th>
+                    <td>{v}</td>
+                </tr>
+                """
+        html += "</table>"
+        return html
 
     # ------------------------------------------------------------------
     # vmin / vmax for gdfs
@@ -282,134 +284,156 @@ def general_map(
                     style_kwds={"style_function": style_fn_fixed},
                 )
 
+    # ==========================================================
+    # POIS
+    # ==========================================================
+    legend_map = {}
 
-
-    # ------------------------------------------------------------------
-    # POIs
-    # ------------------------------------------------------------------
-    legend = True
     for p in pois:
+
         polys, lines, points = split_geoms(p)
 
-        if not polys.empty:
-            if is_thematic(polys, poi_column, poi_cmap):
-                m = polys.explore(
-                    m=m,
-                    column=poi_column,
-                    cmap=poi_cmap,
-                    vmin=poi_vmin,
-                    vmax=poi_vmax,
-                    legend=legend,
-                    style_kwds={"color": "black","fillOpacity": poi_opacity,"weight": 1,},
-                )
-                legend = False
-            else:
-                m = polys.explore(
-                    m=m,
-                    style_kwds={
-                        "color": "black",
-                        "fillColor": poi_color,
-                        "fillOpacity": poi_opacity,
-                        "weight": 1,
-                    },
-                )
-        if not lines.empty:
-            if is_thematic(lines, poi_column, poi_cmap):
-                m = lines.explore(
-                    m=m,
-                    column=poi_column,
-                    cmap=poi_cmap,
-                    vmin=poi_vmin,
-                    vmax=poi_vmax,
-                    legend=legend,
-                    style_kwds={"weight": 2},
-                )
-            else:
-                m = lines.explore(
-                    m=m,
-                    color=poi_color,
-                    style_kwds={"weight": 2},
-                )
+        # ---------------------------
+        # POLYGONS + CENTROID ICON
+        # ---------------------------
+        for _, row in polys.iterrows():
 
-        if not points.empty:
-            # Determine if theming is active
-            thematic = is_thematic(points, poi_column, poi_cmap)
+            geom = row.geometry
+            centroid = geom.centroid
 
-            # Handle categorical color mapping
-            color_map = {}
-            if thematic and points[poi_column].dtype == "object":
-                categories = points[poi_column].unique()
-                cmap = mpl_colormaps[poi_cmap]
-                color_map = {
-                    cat: colors.to_hex(cmap(i / len(categories))) for i, cat in enumerate(categories)
-                }
+            icon_value = row.get(poi_icon_column) if poi_icon_column else None
+            label_value = row.get(poi_column, "POI")
 
-            # Prepare colormap for numeric data if needed
-            elif thematic:
-                cmap = mpl_colormaps[poi_cmap]
-                norm = colors.Normalize(vmin=poi_vmin, vmax=poi_vmax)
+            fill = poi_color or "darkgreen"
 
-            # Compute colors safely
-            def compute_color(row):
-                if thematic:
-                    if points[poi_column].dtype == "object":
-                        color_val = color_map.get(row[poi_column], "#000000")
-                    else:
-                        color_val = colors.to_hex(cmap(norm(row[poi_column])))
-                else:
-                    color_val = poi_color
-                return str(color_val) if color_val else "#000000"
+            gpd.GeoDataFrame([row], geometry=[geom], crs=4326).explore(
+                m=m,
+                color="black",
+                style_kwds={
+                    "fillColor": fill,
+                    "fillOpacity": 1.0,
+                    "weight": 2,
+                },
+            )
 
-            # Assign colors to _color column
-            points["_color"] = points.apply(compute_color, axis=1).astype(str)
+            bg = "white" if icon_value else fill
 
-            # Convert to EPSG:4326 for Folium
-            points_geojson = points.to_crs(4326).copy()
+            html = f"""
+            <div style="position:relative;width:34px;height:34px;">
+                <div style="
+                    position:absolute;
+                    width:34px;height:34px;
+                    background:{bg};
+                    border:2px solid black;
+                    border-radius:50% 50% 50% 0;
+                    transform:rotate(-45deg);
+                "></div>
 
-            # Keep only JSON-serializable columns + _color + geometry
-            serializable_cols = [
-                c for c in points_geojson.columns
-                if c != points_geojson.geometry.name
-                and points_geojson[c].apply(lambda x: isinstance(x, (str, int, float, type(None)))).all()
-            ]
-            for col in list(set(points_geojson.columns) - set(serializable_cols)):
-                if col == points_geojson.geometry.name:
-                    continue 
-                
-                try:
-                    points_geojson[col] = points_geojson[col].astype(str)
-                    serializable_cols.append(col)
-                except:
-                    None
+                <div style="
+                    position:absolute;
+                    top:50%;left:50%;
+                    transform:translate(-50%,-50%);
+                    font-size:18px;
+                ">
+                    {icon_value if icon_value else ""}
+                </div>
+            </div>
+            """
 
-            points_geojson = points_geojson[serializable_cols + [points_geojson.geometry.name]]
+            folium.Marker(
+                location=[centroid.y, centroid.x],
+                icon=folium.DivIcon(html=html, icon_size=(34, 34), icon_anchor=(17, 34)),
+                tooltip=tooltip_html(row),
+                popup=folium.Popup(tooltip_html(row), max_width=300),
+            ).add_to(m)
 
-            # Add proper Markers using BeautifyIcon
-            for _, row in points_geojson.iterrows():
-                tooltip_text = "<br>".join(f"{c}: {row[c]}" for c in serializable_cols if c != "_color")
-                folium.Marker(
-                    location=[row.geometry.y, row.geometry.x],
-                    icon=BeautifyIcon(
-                        icon="circle",
-                        icon_shape="marker",
-                        background_color=row["_color"],
-                        border_color="black",
-                        text_color="white",
-                    ),
-                    tooltip=tooltip_text,
-                    legend=legend
-                ).add_to(m)
-                legend=False
+            if icon_value:
+                legend_map[str(label_value)] = icon_value
 
-    # ------------------------------------------------------------------
-    # AOI outline & clipping
-    # ------------------------------------------------------------------
+        # ---------------------------
+        # LINES
+        # ---------------------------
+        for _, row in lines.iterrows():
+            gpd.GeoDataFrame([row], geometry=[row.geometry], crs=4326).explore(
+                m=m,
+                color=color,
+                style_kwds={"weight": 2},
+            )
+
+        # ---------------------------
+        # POINTS
+        # ---------------------------
+        for _, row in points.iterrows():
+
+            geom = row.geometry
+            icon_value = row.get(poi_icon_column) if poi_icon_column else None
+            label_value = row.get(poi_column, "POI")
+
+            bg = "white" if icon_value else (poi_color or "blue")
+
+            html = f"""
+            <div style="position:relative;width:34px;height:34px;">
+                <div style="
+                    position:absolute;
+                    width:34px;height:34px;
+                    background:{bg};
+                    border:2px solid black;
+                    border-radius:50% 50% 50% 0;
+                    transform:rotate(-45deg);
+                "></div>
+
+                <div style="
+                    position:absolute;
+                    top:50%;left:50%;
+                    transform:translate(-50%,-50%);
+                    font-size:18px;
+                ">
+                    {icon_value if icon_value else ""}
+                </div>
+            </div>
+            """
+
+            folium.Marker(
+                location=[geom.y, geom.x],
+                icon=folium.DivIcon(html=html, icon_size=(34, 34), icon_anchor=(17, 34)),
+                tooltip=tooltip_html(row),
+                popup=folium.Popup(tooltip_html(row), max_width=300),
+            ).add_to(m)
+
+            if icon_value:
+                legend_map[str(label_value)] = icon_value
+
+    # ==========================================================
+    # LEGEND (label + icon)
+    # ==========================================================
+    if legend_map:
+
+        legend_html = """
+        <div style="position:fixed;bottom:40px;left:40px;
+        background:white;padding:10px;z-index:9999;">
+        <b>POI Legend</b><br>
+        """
+
+        for label, icon in legend_map.items():
+            legend_html += f"<div>{label}: {icon}</div>"
+
+        legend_html += "</div>"
+
+        m.get_root().html.add_child(folium.Element(legend_html))
+
+    # ==========================================================
+    # AOI (FIXED - ALWAYS DRAWN)
+    # ==========================================================
     if aoi is not None:
-        m = aoi.explore(
-            m=m,
-            color="blue",
-            fill=False,
-            style_kwds={"weight": 4, "dashArray": "5,5", "opacity": 1.0},
-        )
-        
+        folium.GeoJson(
+            aoi,
+            name="AOI",
+            style_function=lambda x: {
+                "fillColor": "none",
+                "color": "blue",
+                "weight": 3,
+                "dashArray": "5,5",
+            },
+        ).add_to(m)
+
     return m

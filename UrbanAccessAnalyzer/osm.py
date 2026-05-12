@@ -472,6 +472,7 @@ def bus_stops(bounds):
     stops = overpass_api_query(query, bounds)
     return stops.to_crs(bounds.crs)
 
+
 def schools(bounds):
     query = """
         [out:xml] [timeout:25];
@@ -485,6 +486,7 @@ def schools(bounds):
     """
     pois = overpass_api_query(query, bounds)
     return pois.to_crs(bounds.crs)
+
 
 def healthcare(bounds):
     query = """
@@ -503,6 +505,7 @@ def healthcare(bounds):
     """
     pois = overpass_api_query(query, bounds)
     return pois.to_crs(bounds.crs)
+
 
 def groceries(bounds):
     query = """[out:xml][timeout:25];
@@ -548,3 +551,33 @@ def restaurants(bounds):
     """
     pois = overpass_api_query(query, bounds)
     return pois.to_crs(bounds.crs)
+
+
+def libraries(bounds):
+    query = """[out:xml][timeout:25];
+        (
+            node["amenity"="library"]({{bbox}});
+            way["amenity"="library"]({{bbox}});
+            relation["amenity"="library"]({{bbox}});
+        );
+        (._;>;);
+        out body;
+    """
+    pois = overpass_api_query(query, bounds)
+    return pois.to_crs(bounds.crs)
+
+
+def pharmacies(bounds):
+    query = """[out:xml][timeout:25];
+        (
+            node["amenity"="pharmacy"]({{bbox}});
+            way["amenity"="pharmacy"]({{bbox}});
+            relation["amenity"="pharmacy"]({{bbox}});
+        );
+        (._;>;);
+        out body;
+    """
+    pois = overpass_api_query(query, bounds)
+    return pois.to_crs(bounds.crs)
+
+
