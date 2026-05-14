@@ -146,6 +146,46 @@ def general_map(
         html += "</table>"
         return html
 
+    def increase_legend_size(m):
+        legend_css = """
+        <style>
+
+        /* Main legend container */
+        .legend {
+            font-size: 18px !important;
+            background-color: white !important;
+            padding: 12px !important;
+            border-radius: 8px !important;
+            border: 2px solid rgba(0,0,0,0.2) !important;
+            box-shadow: 0 0 15px rgba(0,0,0,0.2) !important;
+        }
+
+        /* Legend title */
+        .legend-title {
+            font-size: 22px !important;
+            font-weight: bold !important;
+            background-color: white !important;
+            padding-bottom: 8px !important;
+        }
+
+        /* Legend labels / bins */
+        .legend-labels {
+            font-size: 18px !important;
+            background-color: white !important;
+        }
+
+        /* Ensure all list items also have white background */
+        .legend ul,
+        .legend li {
+            background-color: white !important;
+        }
+
+        </style>
+        """
+
+        m.get_root().header.add_child(folium.Element(legend_css))
+        return m
+
     # ------------------------------------------------------------------
     # vmin / vmax for gdfs
     # ------------------------------------------------------------------
@@ -199,6 +239,8 @@ def general_map(
                     legend=legend,
                     style_kwds={"color": None, "weight": 0, "fillOpacity": opacity},
                 )
+                if legend:
+                    m = increase_legend_size(m)
                 legend = False
             else:
                 m = polys.explore(
@@ -219,6 +261,8 @@ def general_map(
                     legend=legend,
                     style_kwds={"weight": 2},
                 )
+                if legend:
+                    m = increase_legend_size(m)
                 legend = False
             else:
                 m = lines.explore(m=m, color=color, style_kwds={"weight": 2})
@@ -274,6 +318,9 @@ def general_map(
                     marker_type="circle_marker",
                     style_kwds={"style_function": style_fn},  # dynamic radius
                 )
+                if legend:
+                    m = increase_legend_size(m)
+
                 legend = False
             else:
                 # Fixed color with variable size
@@ -312,7 +359,7 @@ def general_map(
             icon_value = row.get(poi_icon_column) if poi_icon_column else None
             label_value = row.get(poi_column, "POI")
 
-            fill = poi_color or "darkgreen"
+            fill = poi_color or "black"
 
             gpd.GeoDataFrame([row], geometry=[geom], crs=4326).explore(
                 m=m,
