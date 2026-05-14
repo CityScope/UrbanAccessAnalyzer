@@ -449,56 +449,76 @@ def general_map(
 
 def ipyleaflet_drawable_map(m=None, center=[0, 0], zoom=11, height="800px"):
     """
-    Creates an interactive ipyleaflet map with drawing controls (squares & polygons).
-    
+    Creates an interactive ipyleaflet map with drawing controls.
+
     Returns:
-        - m: The ipyleaflet map object
-        - get_drawn_geometries: Function to return stored geometries as a GeoDataFrame
+        - m: ipyleaflet map
+        - get_drawn_geometries(): returns GeoDataFrame
     """
+
     if m is None:
-        # Create a map
-        m = Map(center=center, zoom=zoom, scroll_wheel_zoom=True, layout={'height': height})
+        m = Map(
+            center=center,
+            zoom=zoom,
+            scroll_wheel_zoom=True,
+            layout={'height': height}
+        )
 
         google_hybrid = ipyleaflet.TileLayer(
             url="https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
             name="Google Hybrid",
-            attribution="Google"
+            attribution="Google",
+            opacity=0.75
         )
+
         m.add_layer(google_hybrid)
 
-    # Create a DrawControl object with squares (rectangles) and polygons
     draw_control = DrawControl(
-        rectangle={"shapeOptions": {"color": "blue"}},  # Allow squares & rectangles
-        polygon={"shapeOptions": {"color": "blue"}},    # Allow polygons
-        circle={},
+        rectangle={"shapeOptions": {"color": "red"}},
+        polygon={"shapeOptions": {"color": "red"}},
+        circle={"shapeOptions": {"color": "red"}},
         polyline={},
         marker={},
         circlemarker={}
     )
 
-    # Add the DrawControl to the map
     m.add_control(draw_control)
 
-    # Initialize an empty list to store drawn geometries
-    drawn_geometries = []
+    # Store geometries by layer id
+    drawn_geometries = {}
 
-    # Handle drawn geometries
-    def handle_draw(self, action, geo_json):
-        """Callback function to store drawn geometries."""
-        if action == 'created':  # Store new geometries only
-            geometry = shape(geo_json['geometry'])  # Convert GeoJSON to Shapely geometry
-            drawn_geometries.append(geometry)
-            print(f"New geometry added: {geometry}")
+    def handle_draw(target, action, geo_json):
+        """
+        Handle draw events.
+        """
 
-    # Register the handle_draw function
+        layer_id = geo_json.get("id")
+
+        if action == "created":
+            geom = shape(geo_json["geometry"])
+            drawn_geometries[layer_id] = geom
+            print(f"Geometry created: {layer_id}")
+
+        elif action == "deleted":
+            if layer_id in drawn_geometries:
+                del drawn_geometries[layer_id]
+                print(f"Geometry deleted: {layer_id}")
+
+        elif action == "edited":
+            geom = shape(geo_json["geometry"])
+            drawn_geometries[layer_id] = geom
+            print(f"Geometry edited: {layer_id}")
+
     draw_control.on_draw(handle_draw)
 
     def get_drawn_geometries():
-        """Returns the drawn geometries as a GeoDataFrame."""
-        if drawn_geometries:
-            gdf = gpd.GeoDataFrame({"geometry": drawn_geometries}, crs="EPSG:4326")
-            return gdf
-        else:
-            return None  # No geometries drawn yet
-    
+
+        if len(drawn_geometries) == 0:
+            return None
+
+        return gpd.GeoDataFrame(
+            geometry=list(drawn_geometries.values()),
+            crs="EPSG:4326"
+        )
+
     return m, get_drawn_geometries
