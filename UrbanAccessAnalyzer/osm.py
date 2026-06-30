@@ -377,16 +377,12 @@ def download_street_graph(
     return G
 
 
-def overpass_api_query(query: str, bounds: gpd.GeoDataFrame | gpd.GeoSeries, timeout:int=120):
+def overpass_api_query(query: str, bounds: gpd.GeoDataFrame | gpd.GeoSeries, timeout: int = 120):
 
-    # Convert AOI to WGS84 and create bbox
     bbox = bounds.to_crs(4326).total_bounds
     bbox_str = f"{bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]}"
 
-    # Replace bbox placeholder
     query = query.replace("{{bbox}}", bbox_str)
-
-    # Force JSON output
     query = query.replace("[out:xml]", "[out:json]")
 
     overpass_urls = [
@@ -397,10 +393,7 @@ def overpass_api_query(query: str, bounds: gpd.GeoDataFrame | gpd.GeoSeries, tim
 
     response_json = None
 
-    for url in overpass_urls:
-
-        print(f"\nTrying {url}")
-
+    for i, url in enumerate(overpass_urls, start=1):
         try:
             response = requests.get(
                 url,
@@ -409,35 +402,38 @@ def overpass_api_query(query: str, bounds: gpd.GeoDataFrame | gpd.GeoSeries, tim
                 headers={"User-Agent": "Python Overpass Client"},
             )
 
-            print("Status:", response.status_code)
-
             if response.status_code != 200:
-                print(response.text[:500])
+                print(f"Warning: server {i}/{len(overpass_urls)} failed ({url}) HTTP {response.status_code}")
+                if i < len(overpass_urls):
+                    print(f"Retrying with next Overpass server...")
                 continue
 
             try:
                 response_json = response.json()
             except Exception as e:
-                print("JSON decode failed:", e)
-                print(response.text[:500])
+                print(f"Warning: server {i}/{len(overpass_urls)} failed JSON decode ({e})")
+                if i < len(overpass_urls):
+                    print("Retrying with next Overpass server...")
                 continue
 
             if "elements" not in response_json:
-                print("No 'elements' key in response.")
-                print(response_json)
+                print(f"Warning: server {i}/{len(overpass_urls)} missing 'elements'")
+                if i < len(overpass_urls):
+                    print("Retrying with next Overpass server...")
                 continue
 
-            print(f"Received {len(response_json['elements'])} OSM elements.")
-            break
+            break  # success (even if empty)
 
         except Exception as e:
-            print("Request failed:", e)
-            time.sleep(2)
+            print(f"Warning: server {i}/{len(overpass_urls)} request error ({e})")
+            if i < len(overpass_urls):
+                print("Retrying with next Overpass server...")
+            time.sleep(1)
+            continue
 
     if response_json is None:
         raise RuntimeError("All Overpass servers failed.")
 
-    # Convert to GeoJSON
     geojson_response = json2geojson(response_json)
 
     gdf = gpd.GeoDataFrame.from_features(
@@ -445,11 +441,12 @@ def overpass_api_query(query: str, bounds: gpd.GeoDataFrame | gpd.GeoSeries, tim
         crs="EPSG:4326",
     ).reset_index(drop=True)
 
+    # Empty result (no retry)
     if len(gdf) == 0:
-        print("No features found.")
+        print("Warning: No OSM features found for this query.")
         return gdf.to_crs(bounds.crs)
 
-    # Expand tags column
+    # Expand tags safely
     if "tags" in gdf.columns:
         tags = gdf["tags"].apply(pd.Series)
 
@@ -462,15 +459,10 @@ def overpass_api_query(query: str, bounds: gpd.GeoDataFrame | gpd.GeoSeries, tim
         )
 
     gdf = gdf.loc[:, ~gdf.columns.duplicated()]
-
-    # Reproject
     gdf = gdf.to_crs(bounds.crs)
-
-    # Clip to AOI
     gdf = gdf[gdf.geometry.intersects(bounds.union_all())]
 
     return gdf
-
 
 def green_areas(bounds, intersected_geom=None, min_area=200, min_width=10, buffer=5):
     query = """
