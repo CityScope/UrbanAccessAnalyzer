@@ -6,6 +6,7 @@ import geopandas as gpd
 import pandas as pd
 import osmnx as ox
 from osm2geojson import json2geojson
+import time 
 
 from . import utils
 
@@ -376,39 +377,98 @@ def download_street_graph(
     return G
 
 
-def overpass_api_query(query: str, bounds: gpd.GeoDataFrame | gpd.GeoSeries):
+def overpass_api_query(query: str, bounds: gpd.GeoDataFrame | gpd.GeoSeries, timeout:int=120):
+
+    # Convert AOI to WGS84 and create bbox
     bbox = bounds.to_crs(4326).total_bounds
-    bbox = f"{bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]}"
-    query = query.replace("{{bbox}}", bbox)
-    query = query.replace("{bbox}", bbox)
-    query = query.replace("bbox", bbox)
+    bbox_str = f"{bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]}"
+
+    # Replace bbox placeholder
+    query = query.replace("{{bbox}}", bbox_str)
+
+    # Force JSON output
     query = query.replace("[out:xml]", "[out:json]")
+
     overpass_urls = [
         "https://overpass-api.de/api/interpreter",
         "https://lz4.overpass-api.de/api/interpreter",
-        "https://overpass.kumi.systems/api/interpreter"
+        "https://overpass.kumi.systems/api/interpreter",
     ]
-    for url in overpass_urls:
-        response = requests.get(url, params={"data": query})
-        if response.status_code == 200 and response.text.strip():
-            break
-    else:
-        raise RuntimeError("No valid Overpass API response")
-    
-    geojson_response = json2geojson(response.json())
-    gdf = gpd.GeoDataFrame.from_features(geojson_response, crs=4326).reset_index(
-        drop=True
-    )
-    new_gdf = gdf["tags"].apply(pd.Series)
-    if "type" in new_gdf.columns:
-        new_gdf = new_gdf.rename(columns={"type": "geometry_type"})
 
-    gdf = pd.concat([gdf.drop(columns=["tags"]), new_gdf], axis=1).reset_index(
-        drop=True
-    )
+    response_json = None
+
+    for url in overpass_urls:
+
+        print(f"\nTrying {url}")
+
+        try:
+            response = requests.get(
+                url,
+                params={"data": query},
+                timeout=timeout,
+                headers={"User-Agent": "Python Overpass Client"},
+            )
+
+            print("Status:", response.status_code)
+
+            if response.status_code != 200:
+                print(response.text[:500])
+                continue
+
+            try:
+                response_json = response.json()
+            except Exception as e:
+                print("JSON decode failed:", e)
+                print(response.text[:500])
+                continue
+
+            if "elements" not in response_json:
+                print("No 'elements' key in response.")
+                print(response_json)
+                continue
+
+            print(f"Received {len(response_json['elements'])} OSM elements.")
+            break
+
+        except Exception as e:
+            print("Request failed:", e)
+            time.sleep(2)
+
+    if response_json is None:
+        raise RuntimeError("All Overpass servers failed.")
+
+    # Convert to GeoJSON
+    geojson_response = json2geojson(response_json)
+
+    gdf = gpd.GeoDataFrame.from_features(
+        geojson_response,
+        crs="EPSG:4326",
+    ).reset_index(drop=True)
+
+    if len(gdf) == 0:
+        print("No features found.")
+        return gdf.to_crs(bounds.crs)
+
+    # Expand tags column
+    if "tags" in gdf.columns:
+        tags = gdf["tags"].apply(pd.Series)
+
+        if "type" in tags.columns:
+            tags = tags.rename(columns={"type": "geometry_type"})
+
+        gdf = pd.concat(
+            [gdf.drop(columns=["tags"]), tags],
+            axis=1,
+        )
+
     gdf = gdf.loc[:, ~gdf.columns.duplicated()]
+
+    # Reproject
     gdf = gdf.to_crs(bounds.crs)
+
+    # Clip to AOI
     gdf = gdf[gdf.geometry.intersects(bounds.union_all())]
+
     return gdf
 
 
@@ -581,3 +641,31 @@ def pharmacies(bounds):
     return pois.to_crs(bounds.crs)
 
 
+def gyms(bounds):
+    query = """
+        [out:xml][timeout:25];
+        (
+            node["amenity"="gym"]({{bbox}});
+            way["amenity"="gym"]({{bbox}});
+            relation["amenity"="gym"]({{bbox}});
+        );
+        (._;>;);
+        out body;
+    """
+    pois = overpass_api_query(query, bounds)
+    return pois.to_crs(bounds.crs)
+
+
+def cinemas(bounds):
+    query = """
+        [out:xml][timeout:25];
+        (
+            node["amenity"="cinema"]({{bbox}});
+            way["amenity"="cinema"]({{bbox}});
+            relation["amenity"="cinema"]({{bbox}});
+        );
+        (._;>;);
+        out body;
+    """
+    pois = overpass_api_query(query, bounds)
+    return pois.to_crs(bounds.crs)
