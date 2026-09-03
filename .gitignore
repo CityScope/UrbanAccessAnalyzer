@@ -15,25 +15,25 @@ venv/
 docs/build/
 
 # Python egg files
-*.egg-info
+*.egg-info/
 dist/
 build/
 
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
 no_sync/
 
-examples 
-scripts 
+scripts
 
-# # Ignore everything in examples/
-# examples/**
-
-# # BUT include files directly inside examples/ (no subfolders)
-# !examples/*
-# examples/*/
-
-# # Exclude files that start with "local" (both .py and .ipynb or any extension)
-# examples/local*
+# Large downloaded OSM/PBF fixtures and generated run output under examples/
+examples/output/
+*.osm.pbf
+!tests/fixtures/*.osm.pbf
 
 api_keys.py
+api_keys.json
 
 presentation/

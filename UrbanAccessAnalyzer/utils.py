@@ -1,3 +1,12 @@
+"""Geocoding and misc filesystem/text helpers.
+
+Geocoding goes directly against the Nominatim HTTP API (no osmnx dependency):
+:func:`geocode` for point results, :func:`get_city_geometry` for full place
+boundary polygons via Nominatim's ``polygon_geojson=1`` parameter.
+
+Source: Nominatim search API, https://nominatim.org/release-docs/latest/api/Search/
+"""
+
 import re
 import unicodedata
 import os
@@ -6,8 +15,8 @@ from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 import geopandas as gpd
 from typing import List, Dict, Union
-import osmnx as ox
-from shapely.geometry import Polygon, MultiPolygon, Point
+import shapely
+from shapely.geometry import Polygon, MultiPolygon, Point, shape
 import requests
 
 def geocode(q, results:int=1, buffer:float=0):
@@ -52,25 +61,32 @@ def geocode(q, results:int=1, buffer:float=0):
         return None
 
 def get_city_geometry(city_name: str) -> gpd.GeoDataFrame:
+    """Download a place's boundary polygon from OpenStreetMap via Nominatim.
+
+    Args:
+        city_name: Place name/query, e.g. ``"Berlin, Germany"``.
+
+    Returns:
+        Single-row GeoDataFrame with the place's boundary polygon
+        (EPSG:4326). Falls back to nothing (raises) if Nominatim returns no
+        polygon geometry for the query.
+
+    Raises:
+        ValueError: If no result with a polygon geometry is found.
     """
-    Download city boundary geometry from OpenStreetMap.
+    response = requests.get(
+        "https://nominatim.openstreetmap.org/search",
+        params={"q": city_name, "format": "jsonv2", "polygon_geojson": 1, "limit": 1},
+        headers={"User-Agent": "UrbanAccessAnalyzer"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    results = response.json()
+    if not results or "geojson" not in results[0]:
+        raise ValueError(f"No boundary polygon found for {city_name!r}.")
 
-    Parameters
-    ----------
-    city_name : str
-        Name of the city (e.g., "Berlin, Germany").
-
-    Returns
-    -------
-    gdf : geopandas.GeoDataFrame
-        GeoDataFrame containing the city boundary polygon in EPSG:4326.
-    """
-    # Query OSM for place boundary
-    gdf = ox.geocode_to_gdf(city_name)
-
-    # Ensure CRS is WGS84
-    gdf = gdf.to_crs(epsg=4326)
-    return gdf
+    geom = shape(results[0]["geojson"])
+    return gpd.GeoDataFrame({"display_name": [results[0]["display_name"]]}, geometry=[geom], crs="EPSG:4326")
 
 
 def get_geographic_suggestions_from_string(
