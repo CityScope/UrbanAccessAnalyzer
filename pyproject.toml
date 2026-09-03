@@ -64,6 +64,10 @@ docs = [
     "furo>=2024.8.0",
 ]
 
+[tool.uv.sources]
+pycensus = { path = "../pyCensus", editable = true }
+geohierarchy = { path = "../geohierarchy", editable = true }
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
