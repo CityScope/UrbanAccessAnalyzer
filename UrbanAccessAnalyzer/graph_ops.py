@@ -256,14 +256,44 @@ def crop_by_aoi_connected(
             wide_nodes, wide_edges = crop_by_aoi(all_nodes, all_edges, poly_gdf)
             if wide_edges.height > 0:
                 wide_labeled = connected_component_labels(wide_nodes, wide_edges)
-                if wide_labeled["_component"].n_unique() == 1:
-                    # The wider (e.g. "all roads") network is itself
-                    # connected across this polygon -- adopt it wholesale
-                    # as this polygon's walk graph. Every edge in it is
-                    # now a real, used routing edge, i.e. genuinely
-                    # "considered walkable", not a special-cased bridge.
-                    poly_nodes, poly_edges = wide_nodes, wide_edges
-                    labeled = wide_labeled
+                # Bug fix (2026-09-04, live: Andorra's walk-only graph
+                # collapsed from ~4,400 nodes to 252 once trunk/primary
+                # roads were excluded by default). This used to require
+                # the wider graph to be a PERFECT single component
+                # (`n_unique() == 1`) before adopting it -- real OSM data
+                # essentially never is (Andorra's real "all roads" crop:
+                # 158 components, but the largest is 135,657 of 139,992
+                # nodes -- 97%, the rest is ordinary noise like isolated
+                # parking-lot loops and disconnected service tracks). That
+                # strict check failed, so the wider graph was silently
+                # never adopted at all, and the code fell through to the
+                # largest-component fallback below applied to the
+                # NARROW (walk-only) graph's own fragmented components --
+                # exactly the small-village-sized island the wider
+                # profile exists to bridge past. Fixed: always prefer the
+                # wider graph's own largest connected component over the
+                # narrow graph's, whenever a wider graph is available --
+                # by construction it can only be a superset of the narrow
+                # graph's connectivity (more road types = more edges),
+                # never a worse choice, so there's no case where checking
+                # for "perfectly single component" first was actually
+                # buying extra safety.
+                wide_sizes = wide_labeled.group_by("_component").len().sort("len", descending=True)
+                wide_largest = wide_sizes["_component"][0]
+                wide_keep_ids = set(
+                    wide_labeled.filter(pl.col("_component") == wide_largest)["node_id"].to_list()
+                )
+                wide_nodes_kept = wide_nodes.filter(pl.col("node_id").is_in(wide_keep_ids))
+                wide_edges_kept = wide_edges.filter(
+                    pl.col("u").is_in(wide_keep_ids) & pl.col("v").is_in(wide_keep_ids)
+                )
+                if wide_nodes_kept.height >= poly_nodes.height:
+                    # The wider graph's best connected piece covers at
+                    # least as much as the narrow graph did -- every edge
+                    # in it is now a real, used routing edge, i.e.
+                    # genuinely "considered walkable", not a special-cased
+                    # bridge.
+                    poly_nodes, poly_edges = wide_nodes_kept, wide_edges_kept
                     n_components = 1
 
         if n_components > 1:

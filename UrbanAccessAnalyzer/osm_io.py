@@ -66,6 +66,17 @@ WALK_HIGHWAYS = {
     # the only road serving a block (a real issue in car-oriented street grids
     # like Guadalajara's, where sidewalks along arterials are the only walkable
     # connection between residential clusters).
+    #
+    # 2026-09-04: briefly narrowed this to exclude trunk/primary (explicit
+    # user request at the time to only include non-walk roads "really
+    # needed for connectivity"), then reverted the same day (explicit
+    # follow-up: "delete this idea of excluding highway and only include
+    # edges really needed for the graph. Include all public roads
+    # regardless if they are walk or not"). Kept here as a pure highway-
+    # tag allowlist again; the actual "all public roads" behavior for the
+    # default street network build comes from `network_type="all"` in
+    # `transitlos.network.prepare_street_network` (which bypasses this set
+    # entirely -- see `NETWORK_PROFILES["all"]`), not from this constant.
     "trunk", "trunk_link", "primary", "primary_link",
     "secondary", "secondary_link", "tertiary", "tertiary_link",
 }
@@ -335,6 +346,7 @@ def load_pbf(
             refs,
             tags['highway'] AS highway,
             tags['foot'] AS foot,
+            tags['access'] AS access_tag,
             tags['bicycle'] AS bicycle,
             tags['oneway'] AS oneway_tag
         FROM ST_ReadOSM(?) w
@@ -356,6 +368,23 @@ def load_pbf(
     keep_mask = pl.lit(True) if allowed_highways is None else pl.col("highway").is_in(list(allowed_highways))
     for tag_key, allowed_values in profile["extra_tags"].items():
         keep_mask = keep_mask | pl.col(tag_key).is_in(list(allowed_values))
+    # 2026-09-04 fix / explicit follow-up user request: "roads where it is
+    # explicit that pedestrians are not allowed [should] be excluded."
+    # Only for walk-oriented profiles (identified by "foot" being one of
+    # this profile's extra_tags -- walk/walk+bike/walk+bike+primary; not
+    # bike/drive/all, where a pedestrian-access tag is irrelevant): a way
+    # highway-type-eligible for walking is still dropped if it's EXPLICITLY
+    # tagged as pedestrian-prohibited (`foot=no/private/use_sidepath`, or a
+    # blanket `access=no/private` with no `foot=yes/permissive/designated`
+    # override) -- a real, if rare, case the pure highway-type allowlist
+    # above never checked for (it only ever ADDS ways by tag, never
+    # excludes one already highway-eligible).
+    if "foot" in profile["extra_tags"]:
+        foot_prohibited = pl.col("foot").is_in(["no", "private", "use_sidepath"])
+        access_prohibited = pl.col("access_tag").is_in(["no", "private"]) & ~pl.col("foot").is_in(
+            ["yes", "permissive", "designated"]
+        )
+        keep_mask = keep_mask & ~foot_prohibited & ~access_prohibited
     ways = ways.filter(keep_mask & pl.col("highway").is_not_null())
 
     if ways.is_empty():

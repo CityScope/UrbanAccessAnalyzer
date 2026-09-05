@@ -122,6 +122,7 @@ class StreetNetwork:
         network_type: str = "walk",
         simplify_distance: Optional[float] = None,
         ignore_oneway: bool = False,
+        crop_buffer_m: float = 500.0,
     ) -> "StreetNetwork":
         """Build a street network from a local (or Geofabrik-downloaded) PBF file.
 
@@ -142,6 +143,19 @@ class StreetNetwork:
                 docstring). ``network_type="walk"`` already ignores oneway
                 unconditionally; this only matters for other profiles
                 (e.g. ``"all"``) used for walking-access purposes.
+            crop_buffer_m: Metres to buffer ``aoi`` by before cropping the
+                network to it (2026-09-04, explicit user request: "crop_by_
+                aoi_connected here you should use the aoi with a buffer" --
+                a buffer is only ever for avoiding a stop-cropping/network-
+                boundary effect, never for anything population-related,
+                which stays on the real unbuffered AOI elsewhere in the
+                pipeline). Cropping a street network to the EXACT AOI edge
+                can cut a real street mid-block right at the boundary,
+                producing an artificial dead end and, in the worst case,
+                stranding an otherwise-real stop/destination just outside
+                the crop -- a small buffer keeps a margin of real network
+                around the AOI so nothing legitimate right at the edge gets
+                severed. Set to ``0`` for the old exact-AOI behavior.
 
         Returns:
             A new :class:`StreetNetwork`, projected to a local UTM CRS.
@@ -156,7 +170,43 @@ class StreetNetwork:
         )
         nodes, edges, crs = graph_ops.project(nodes, edges)
         if aoi is not None:
-            nodes, edges = graph_ops.crop_by_aoi(nodes, edges, aoi.gdf.to_crs(crs))
+            # 2026-09-04: this briefly built a separate wider "all roads"
+            # graph here specifically to bridge a restricted `"walk"`
+            # profile's connectivity gaps -- reverted the same day
+            # (explicit user request: "delete this idea of excluding
+            # highway and only include edges really needed for the graph.
+            # Include all public roads regardless if they are walk or
+            # not"). `network_type` defaults to `"all"` again (see
+            # `transitlos.network.prepare_street_network`), so `nodes`/
+            # `edges` already ARE the widest available graph -- no
+            # separate wider-profile fallback needed; `crop_by_aoi_connected`
+            # still repairs connectivity per simple polygon (falling back
+            # to each polygon's largest connected component) even without
+            # a wider profile to bridge from.
+            # `crop_by_aoi_connected` (not plain `crop_by_aoi`): repairs any
+            # connectivity fragmentation the crop introduces, per simple
+            # polygon of `aoi` (a real, isolated island stays isolated; a
+            # spurious cut from cropping does not). Buffered by
+            # `crop_buffer_m` -- see that parameter's docstring.
+            # Dissolve `aoi.gdf`'s rows into one geometry FIRST. `aoi.gdf`
+            # is often several rows (e.g. one per municipality) whose
+            # polygons individually fragment further into many slivers
+            # (Concepcion: 11 municipality rows, ~992 constituent polygons
+            # once exploded) -- if those were handed to
+            # `crop_by_aoi_connected` as-is, each row/sliver would be
+            # treated as an independent connectivity domain even where two
+            # rows share a real border (e.g. Penco touching Concepcion,
+            # Talcahuano, Tome), silently dropping real streets near every
+            # such internal seam once they end up in a smaller-than-largest
+            # component with no wider profile left to rescue them (bug
+            # found live 2026-09-04: Penco streets missing on the map).
+            # Union first so only genuinely disjoint pieces of the AOI
+            # (real islands/exclaves) remain separate polygons after the
+            # explode step inside `crop_by_aoi_connected`.
+            crop_aoi_gdf = gpd.GeoDataFrame(geometry=[aoi.gdf.to_crs(crs).union_all()], crs=crs)
+            if crop_buffer_m:
+                crop_aoi_gdf["geometry"] = crop_aoi_gdf.geometry.buffer(crop_buffer_m)
+            nodes, edges = graph_ops.crop_by_aoi_connected(nodes, edges, crop_aoi_gdf)
         if simplify_distance:
             nodes, edges = graph_ops.simplify(nodes, edges, cluster_distance=simplify_distance)
         return cls(nodes, edges, crs)
@@ -174,9 +224,25 @@ class StreetNetwork:
         nodes, edges = graph_ops.simplify(self.nodes, self.edges, cluster_distance, protected_node_ids)
         return StreetNetwork(nodes, edges, self.crs)
 
-    def crop(self, aoi: AreaOfInterest) -> "StreetNetwork":
-        """Crop this network to an AOI; see :func:`UrbanAccessAnalyzer.graph_ops.crop_by_aoi`."""
-        nodes, edges = graph_ops.crop_by_aoi(self.nodes, self.edges, aoi.gdf.to_crs(self.crs))
+    def crop(self, aoi: AreaOfInterest, crop_buffer_m: float = 500.0) -> "StreetNetwork":
+        """Crop this network to an AOI; see :func:`UrbanAccessAnalyzer.graph_ops.crop_by_aoi_connected`.
+
+        Args:
+            aoi: Area to crop to.
+            crop_buffer_m: Metres to buffer ``aoi`` by first -- see
+                :meth:`from_pbf`'s ``crop_buffer_m`` docstring (a buffer is
+                only ever for avoiding a network-boundary effect, never for
+                anything population-related). ``0`` for the exact-AOI
+                behavior.
+        """
+        # See the matching comment in `from_pbf`: union `aoi.gdf`'s rows
+        # into one geometry before buffering/exploding, so touching rows
+        # (e.g. adjoining municipalities) aren't treated as independent
+        # connectivity domains.
+        crop_aoi_gdf = gpd.GeoDataFrame(geometry=[aoi.gdf.to_crs(self.crs).union_all()], crs=self.crs)
+        if crop_buffer_m:
+            crop_aoi_gdf["geometry"] = crop_aoi_gdf.geometry.buffer(crop_buffer_m)
+        nodes, edges = graph_ops.crop_by_aoi_connected(self.nodes, self.edges, crop_aoi_gdf)
         return StreetNetwork(nodes, edges, self.crs)
 
     def snap_points(self, points: "PointsOfInterest", max_dist: Optional[float] = None, min_edge_length: float = 1.0):
