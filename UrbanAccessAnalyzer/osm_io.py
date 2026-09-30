@@ -152,24 +152,51 @@ def _write_poly_file(aoi: gpd.GeoDataFrame | gpd.GeoSeries, poly_path: str) -> N
         f.write("END\n")
 
 
-def download_geofabrik(aoi: gpd.GeoDataFrame | gpd.GeoSeries, output_folder: Optional[str] = None) -> str:
-    """Download the smallest Geofabrik region that fully contains an AOI.
+def download_geofabrik(
+    aoi: gpd.GeoDataFrame | gpd.GeoSeries, output_folder: Optional[str] = None, coverage_tolerance: float = 1e-4
+) -> str:
+    """Download the smallest Geofabrik region that (near-)fully covers an AOI.
 
     Args:
         aoi: AOI geometry, in any CRS.
         output_folder: Folder to save the downloaded ``.osm.pbf`` into. If
             ``None``, saves to the current working directory.
+        coverage_tolerance: Maximum fraction of ``aoi``'s own area allowed
+            to fall OUTSIDE a candidate region before it's rejected
+            (``aoi.difference(region).area / aoi.area <= coverage_tolerance``),
+            rather than requiring exact topological containment. Two
+            real-world boundary sources for the "same" administrative area
+            (e.g. Census TIGER vs. OSM/Geofabrik's own drawn state
+            boundary) essentially never align vertex-for-vertex, so a
+            strict ``region_geom.contains(aoi_geom)`` check routinely fails
+            over a sliver of area that is pure boundary-simplification
+            noise, not a real gap -- found live 2026-09-29: Census TIGER's
+            New Mexico polygon failed strict containment against
+            Geofabrik's own ``us/new-mexico`` region by a difference area
+            of ~0.00024 sq degrees (a rounding-level mismatch), silently
+            falling back to downloading the entire "United States of
+            America" (953 MB) extract instead of New Mexico's own (a few
+            MB) -- exactly the kind of unnecessary, oversized download this
+            function exists to avoid, and a serious problem at national,
+            state-by-state processing scale where the whole point is
+            NEVER loading more than one state's/county's OSM data into
+            memory at a time. The real New-Mexico-vs-Geofabrik mismatch
+            measured `~7.6e-6` of the AOI's own area; default `1e-4`
+            (0.01%) keeps a >10x margin above that observed noise level
+            while still rejecting a region actually missing a real,
+            substantial piece of the AOI.
 
     Returns:
         Path to the downloaded (or already-cached) ``.osm.pbf`` file.
 
     Raises:
-        ValueError: If no Geofabrik region contains the AOI.
+        ValueError: If no Geofabrik region covers the AOI within tolerance.
     """
     aoi = aoi.to_crs(4326)
     aoi_geom = aoi.union_all()
     if not aoi_geom.is_valid:
         print("Validity problem:", shapely.validation.explain_validity(aoi_geom))
+    aoi_area = aoi_geom.area
 
     url = "https://download.geofabrik.de/index-v1.json"
     print(f"Fetching Geofabrik index from {url}...")
@@ -187,11 +214,12 @@ def download_geofabrik(aoi: gpd.GeoDataFrame | gpd.GeoSeries, output_folder: Opt
         except Exception as e:
             print(f"Warning: could not process geometry for {properties.get('name', 'N/A')}: {e}")
             continue
-        if region_geom.contains(aoi_geom):
+        uncovered_fraction = aoi_geom.difference(region_geom).area / aoi_area if aoi_area > 0 else 0.0
+        if uncovered_fraction <= coverage_tolerance:
             candidate_regions.append((region_geom.area, properties))
 
     if not candidate_regions:
-        raise ValueError("No Geofabrik region was found to contain the AOI.")
+        raise ValueError("No Geofabrik region was found to cover the AOI (within tolerance).")
 
     candidate_regions.sort(key=lambda x: x[0])
     best_region = candidate_regions[0][1]
