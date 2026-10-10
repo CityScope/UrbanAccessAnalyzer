@@ -37,3 +37,71 @@ api_keys.py
 api_keys.json
 
 presentation/
+
+# ===== Processing results are never tracked (only code) =====
+# Anything a run produces -- data, tiles, maps, caches, logs, downloaded feeds / OSM extracts, audit tables -- stays local
+# and is regenerable by re-running the code. Test fixtures under tests/ are code assets and stay trackable.
+
+# Result / raw-data / cache file types (anywhere in the repo)
+*.parquet
+*.geoparquet
+*.gpkg
+*.geojson
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.pmtiles
+*.mbtiles
+*.pbf
+*.osm.pbf
+*.tif
+*.tiff
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.feather
+*.h5
+*.hdf5
+*.zip
+*.log
+nohup.out
+*.tmp
+*.part
+.cache/
+*_cache/
+_network_cache*/
+pycensus_cache/
+
+# Generated maps and audit/summary tables
+map.html
+combined_map.html
+*_map.html
+feed_report.json
+feed_exceptions.csv
+feed_audit.csv
+feed_size_audit.csv
+feeds_dropped_by_analysis_date.csv
+score_audit.csv
+ptlos_by_state.csv
+stops_signature.txt
+h3_scheme_v*.txt
+
+# Secrets / local configuration
+api_keys.json
+*.env
+.env
+
+# Run output folders (anchored at the repo root)
+/data/
+/output/
+/outputs/
+/results/
+/figures/
+/logs/
+/tiles/
+
+# Test fixtures are code assets: keep them trackable even though they match the types above.
+!tests/**

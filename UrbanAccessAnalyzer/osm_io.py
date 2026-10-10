@@ -238,11 +238,67 @@ def download_geofabrik(
         return output_file
 
     print(f"Downloading '{best_region['name']}' from {pbf_url} ...")
-    pbf_response = requests.get(pbf_url, stream=True)
-    pbf_response.raise_for_status()
-    with open(output_file, "wb") as f:
-        for chunk in pbf_response.iter_content(chunk_size=8192):
-            f.write(chunk)
+    import re
+    import time
+
+    # Candidate URLs: "-latest" first, then the newest dated files in the same
+    # folder listing (Geofabrik's "-latest" link is sometimes missing/looping).
+    # Each candidate is retried; the file is downloaded to a temp name, resumed
+    # with HTTP Range, and renamed only when complete so a dropped connection
+    # never leaves a truncated file that later looks cached.
+    base, _, fname = pbf_url.rpartition("/")
+    stem = fname.replace("-latest.osm.pbf", "")
+    part_file = output_file + ".part"
+    if os.path.exists(part_file):
+        os.remove(part_file)
+
+    def _candidates():
+        yield pbf_url
+        try:
+            listing = requests.get(base + "/", timeout=60).text
+            dated = sorted(set(re.findall(rf'{re.escape(stem)}-(\d{{6}})\.osm\.pbf"', listing)), reverse=True)
+        except requests.RequestException:
+            dated = []
+        for d in dated[:3]:
+            yield f"{base}/{stem}-{d}.osm.pbf"
+
+    last_exc: Optional[Exception] = None
+    success = False
+    for url in _candidates():
+        for attempt in range(1, 6):
+            try:
+                done = os.path.getsize(part_file) if os.path.exists(part_file) else 0
+                headers = {"Range": f"bytes={done}-"} if done else {}
+                with requests.get(url, stream=True, headers=headers, timeout=120) as resp:
+                    if resp.status_code == 416:  # already complete
+                        success = True
+                        break
+                    resp.raise_for_status()
+                    mode = "ab" if (done and resp.status_code == 206) else "wb"
+                    with open(part_file, mode) as f:
+                        for chunk in resp.iter_content(chunk_size=1 << 20):
+                            f.write(chunk)
+                success = True
+                break
+            except requests.TooManyRedirects as exc:
+                last_exc = exc
+                break  # broken "-latest" link: go straight to the next candidate
+            except requests.HTTPError as exc:
+                last_exc = exc
+                if exc.response is not None and exc.response.status_code in (403, 404):
+                    break  # not there: try the next candidate
+                print(f"Download attempt {attempt} of {url} failed ({exc}); retrying...")
+                time.sleep(10 * attempt)
+            except (requests.RequestException, OSError) as exc:
+                last_exc = exc
+                print(f"Download attempt {attempt} of {url} failed ({exc}); retrying...")
+                time.sleep(10 * attempt)
+        if success:
+            print(f"Using {url}")
+            break
+    if not success:
+        raise last_exc if last_exc else RuntimeError("Geofabrik download failed")
+    os.replace(part_file, output_file)
     print(f"Downloaded geofabrik to {output_file}")
     return output_file
 
