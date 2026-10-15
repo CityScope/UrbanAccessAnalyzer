@@ -339,3 +339,10 @@ def aoi_key(aoi: gpd.GeoDataFrame, *parts) -> str:
     for part in parts:
         h.update(repr(part).encode())
     return h.hexdigest()[:12]
+
+
+def output_folder(place: str, base: str = "output") -> str:
+    """The folder where the results of a place are saved (``output/<place>``), created if it does not exist."""
+    folder = os.path.join(base, sanitize_filename(place))
+    os.makedirs(folder, exist_ok=True)
+    return folder

@@ -61,7 +61,7 @@ def test_save_access_map_writes_standalone_html(tmp_path):
     out = tmp_path / "maps" / "m.html"
     plotting.save_access_map(str(out), h, h, {"population": "👥 Population", "access_score": "🚶 Score"}, "access_score")
     html = out.read_text()
-    assert "L.maplibreGL" in html and "Population" in html and "tile.openstreetmap.org" in html  # fallback
+    assert "L.maplibreGL" in html and "Population" in html and "openstreetmap.org/{z}" not in html
 
 
 def test_rank_to_label():
@@ -131,3 +131,10 @@ def test_relocate_weight_method_moves_people_to_hexagons_with_streets(monkeypatc
     assert (moved.loc[moved["rank"].isna(), "population"] == 0).all()  # everyone now lives where there is a street
     capped = h3_population.h3_with_population(street, aoi, ["rank"], 10, empty_cells="relocate_weight", max_distance=30)
     assert capped.attrs["excluded_weight"] > 0 and capped["population"].sum() < ignore["population"].sum()
+
+
+def test_output_folder_is_created(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    folder = utils.output_folder("Alcoy, España")
+    assert folder == "output/alcoy__espana" and (tmp_path / "output" / "alcoy__espana").is_dir()
+    assert utils.output_folder("Alcoy, España") == folder  # calling it again is fine

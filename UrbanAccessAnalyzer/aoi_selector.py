@@ -22,9 +22,44 @@ from shapely.geometry import shape
 
 from . import utils
 
-OSM_TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"  # open map data, no key
-OSM_ATTRIBUTION = "&copy; OpenStreetMap contributors"
+OPENFREEMAP_TILEJSON = "https://tiles.openfreemap.org/planet"  # vector tiles of OpenStreetMap data, no key
+OPENFREEMAP_ATTRIBUTION = (
+    '&copy; <a href="https://openfreemap.org">OpenFreeMap</a> '
+    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+)
+# Light style for the OpenFreeMap (OpenMapTiles schema) layers
+BASEMAP_STYLES = {
+    "landcover": {"fill": True, "fillColor": "#d9e8cb", "fillOpacity": 0.7, "weight": 0},
+    "landuse": {"fill": True, "fillColor": "#ece8e1", "fillOpacity": 0.6, "weight": 0},
+    "park": {"fill": True, "fillColor": "#cde7c0", "fillOpacity": 0.8, "weight": 0},
+    "water": {"fill": True, "fillColor": "#aad3df", "fillOpacity": 1, "color": "#aad3df", "weight": 0.5},
+    "waterway": {"color": "#aad3df", "weight": 1},
+    "building": {"fill": True, "fillColor": "#e4dfd6", "fillOpacity": 1, "color": "#d5cec3", "weight": 0.5},
+    "transportation": {"color": "#b4aea3", "weight": 1},
+    "boundary": {"color": "#999999", "weight": 1, "dashArray": "4,4"},
+}
+# Point/label layers are not drawn (an unstyled layer would get Leaflet's default blue style)
+for _layer in ("aerodrome_label", "aeroway", "housenumber", "mountain_peak", "place", "poi", "transportation_name",
+               "water_name"):
+    BASEMAP_STYLES[_layer] = {"fill": False, "stroke": False, "opacity": 0, "fillOpacity": 0, "weight": 0}
+
 LARGE_AREA_KM2 = 2000  # warn above this: downloads and isochrones get slow
+
+
+def _openfreemap_layer():
+    """OpenFreeMap vector tiles as an ipyleaflet layer (``None`` if the tile service cannot be reached)."""
+    import ipyleaflet
+    import requests
+
+    try:
+        tiles = requests.get(OPENFREEMAP_TILEJSON, timeout=10, headers={"User-Agent": utils.USER_AGENT}).json()["tiles"][0]
+    except Exception as e:  # noqa: BLE001 - offline, blocked...
+        print(f"Background map not available ({e}); the place is still drawn.")
+        return None
+    return ipyleaflet.VectorTileLayer(
+        url=tiles, layer_styles=BASEMAP_STYLES, attribution=OPENFREEMAP_ATTRIBUTION,
+        max_native_zoom=14, name="OpenFreeMap",
+    )
 
 
 def view_for_bounds(bounds, width: int = 800, height: int = 500, margin: float = 1.25):
@@ -49,7 +84,10 @@ class AoiSelector:
         self.place = place
         self.geocoded = geocoded
         self.map = ipyleaflet.Map(center=(20, 0), zoom=2, scroll_wheel_zoom=True, layout={"height": height})
-        self.map.add_layer(ipyleaflet.TileLayer(url=OSM_TILES, attribution=OSM_ATTRIBUTION, name="OpenStreetMap"))
+        self.map.clear_layers()  # ipyleaflet adds an OpenStreetMap tile layer by default: not used here
+        background = _openfreemap_layer()
+        if background is not None:
+            self.map.add_layer(background)
 
         if geocoded is not None and not geocoded.empty:
             self.map.add_layer(ipyleaflet.GeoJSON(

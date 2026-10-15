@@ -3,7 +3,7 @@ import polars as pl
 import pytest
 import shapely
 
-from UrbanAccessAnalyzer import api, grading, osm_io
+from UrbanAccessAnalyzer import api, grading, osm, osm_io
 
 
 def _network(sample_pbf_path, sample_aoi):
@@ -26,7 +26,7 @@ def test_tag_query_returns_callable():
 def test_check_specs_rejects_bad_geometry():
     bad = [{"name": "x", "query": None, "geometry": "Line", "importance": 1, "max_distance": 1}]
     with pytest.raises(ValueError):
-        grading.fetch_pois(bad, gpd.GeoDataFrame(geometry=[], crs=4326), 4326)
+        osm.fetch_all(bad, gpd.GeoDataFrame(geometry=[], crs=4326), 4326)
 
 
 def test_grade_weighted_scores(sample_pbf_path, sample_aoi):
@@ -57,12 +57,12 @@ def test_query_from_file_and_poi_table(tmp_path):
     pts.to_file(path)
     bounds = gpd.GeoDataFrame(geometry=[shapely.box(-0.5, 38.6, -0.4, 38.8)], crs=4326)
 
-    df = grading.query_from_file(str(path), name_column="nombre")(bounds)
+    df = osm.query_from_file(str(path), name_column="nombre")(bounds)
     assert df.height == 2 and set(df["name"]) == {"A", "B"}
 
     specs = [{"name": "mine", "query": None, "geometry": "Point", "importance": 1, "max_distance": 500, "icon": "🍺"}]
-    gdf = grading.fetch_pois([{**specs[0], "query": lambda b: df}], bounds, 4326)
-    table = grading.poi_table(specs, gdf)
+    gdf = osm.fetch_all([{**specs[0], "query": lambda b: df}], bounds, 4326)
+    table = osm.table(specs, gdf)
     assert list(table["icon"].unique()) == ["🍺"] and set(table["name"]) == {"A", "B"}
 
 
@@ -111,20 +111,20 @@ def test_poi_sources(tmp_path):
     import shapely
     from UrbanAccessAnalyzer import osm_io
 
-    assert grading.poi("s", "schools")["query"] is osm_io.schools
-    p = grading.poi("parks", "green_areas", importance=2, icon="🌳")
+    assert osm.poi("s", "schools")["query"] is osm_io.schools
+    p = osm.poi("parks", "green_areas", importance=2, icon="🌳")
     assert p["geometry"] == "Polygon" and p["importance"] == 2 and p["icon"] == "🌳"
-    assert grading.poi("d", ("amenity", "dentist"))["query"].__name__ == "amenity_dentist"
+    assert osm.poi("d", ("amenity", "dentist"))["query"].__name__ == "amenity_dentist"
     f = lambda b: None
-    assert grading.poi("c", f, geometry="Polygon")["query"] is f
+    assert osm.poi("c", f, geometry="Polygon")["query"] is f
 
     path = tmp_path / "x.gpkg"
     gpd.GeoDataFrame({"n": ["a"]}, geometry=[shapely.Point(0, 0)], crs=4326).to_file(path)
-    mine = grading.poi("mine", str(path), name_column="n")
+    mine = osm.poi("mine", str(path), name_column="n")
     assert mine["geometry"] == "Point" and callable(mine["query"])
     for bad in (123, "no_such_file.gpkg"):
         try:
-            grading.poi("x", bad)
+            osm.poi("x", bad)
         except (TypeError, FileNotFoundError):
             pass
         else:
@@ -140,7 +140,7 @@ def test_overpass_filter_becomes_full_query(monkeypatch):
     seen = {}
     monkeypatch.setattr(osm_io, "overpass_query", lambda q, b: seen.setdefault("q", q) and pl.DataFrame())
     bounds = gpd.GeoDataFrame(geometry=[shapely.box(0, 0, 1, 1)], crs=4326)
-    grading.poi("c", 'nwr["amenity"~"hospital|clinic"]')["query"](bounds)
+    osm.poi("c", 'nwr["amenity"~"hospital|clinic"]')["query"](bounds)
     assert '[out:json]' in seen["q"] and '{{bbox}}' in seen["q"] and 'hospital|clinic' in seen["q"] and "out body" in seen["q"]
     full = '[out:json];node["a"="b"]({{bbox}});out;'
-    assert grading.poi("f", full)["query"].__name__ == "overpass_query_custom"
+    assert osm.poi("f", full)["query"].__name__ == "overpass_query_custom"

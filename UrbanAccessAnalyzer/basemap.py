@@ -53,11 +53,16 @@ class MapLibreBasemap(MacroElement):
                 try { var c = document.createElement('canvas'); return !!(c.getContext('webgl2') || c.getContext('webgl')); }
                 catch (e) { return false; }
             }
-            // Plain OpenStreetMap tiles always go underneath: they are what you see if the vector background cannot
-            // draw (blocked scripts or workers, no WebGL, notebook sandboxes). The MapLibre vector style goes on top.
-            L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                maxZoom: 19, attribution: '&copy; OpenStreetMap contributors', zIndex: -1
-            }).addTo(map);
+            function notice(text) {
+                var c = L.control({position: 'bottomleft'});
+                c.onAdd = function() {
+                    var d = L.DomUtil.create('div');
+                    d.style.cssText = 'background:#fff;padding:4px 8px;border-radius:6px;font:12px sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.3)';
+                    d.textContent = text; return d;
+                };
+                c.addTo(map);
+            }
+            var hint = 'Background map not available here. Open the saved .html file in your browser.';
             if (typeof L.maplibreGL === 'function' && typeof maplibregl !== 'undefined' && hasWebGL()) {
                 try {
                     var gl = L.maplibreGL({
@@ -66,16 +71,16 @@ class MapLibreBasemap(MacroElement):
                         pane: {{ this.pane|tojson }}
                     }).addTo(map);
                     // A style paints a solid background even if its tiles never load (e.g. blocked workers): if no
-                    // vector tile arrives in a few seconds, drop the vector layer so the OpenStreetMap tiles show.
+                    // vector tile arrives in a few seconds, remove it and say so.
                     var tilesLoaded = false, dropGl = function() {
-                        if (!tilesLoaded && map.hasLayer(gl)) { map.removeLayer(gl); console.warn('MapLibre tiles did not load, showing OpenStreetMap tiles'); }
+                        if (!tilesLoaded && map.hasLayer(gl)) { map.removeLayer(gl); notice(hint); console.warn('MapLibre tiles did not load'); }
                     };
                     var mgl = gl.getMaplibreMap();
                     mgl.on('sourcedata', function(e) { if (e.tile) { tilesLoaded = true; } });
                     mgl.on('error', function() { setTimeout(dropGl, 1500); });
                     setTimeout(dropGl, 8000);
-                } catch (e) { console.warn('MapLibre background failed, showing OpenStreetMap tiles', e); }
-            }
+                } catch (e) { notice(hint); console.warn('MapLibre background failed', e); }
+            } else { notice(hint); }
         })();
         {% endmacro %}
         """

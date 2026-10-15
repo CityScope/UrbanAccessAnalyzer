@@ -19,7 +19,7 @@ from typing import Optional, Sequence, Union
 import geopandas as gpd
 import pandas as pd
 
-from . import api, grading, h3_population, osm_io, plotting, utils
+from . import api, grading, h3_population, osm, osm_io, plotting, utils
 
 
 @dataclass
@@ -192,8 +192,8 @@ def walkability(
         os.path.join(cache_dir, "pbf", "region.osm.pbf"), aoi=aoi_download, network_type="walk", simplify_distance=30,
         cache_dir=os.path.join(cache_dir, "networks"),
     )
-    poi_gdfs = grading.fetch_pois(pois, aoi_download, crs=network.crs)  # if it fails, run again: Overpass can be busy
-    poi_table = grading.poi_table(pois, poi_gdfs)
+    poi_gdfs = osm.fetch_all(pois, aoi_download, crs=network.crs)  # if it fails, run again: Overpass can be busy
+    poi_table = osm.table(pois, poi_gdfs)
     poi_map = plotting.save_poi_map(os.path.join(folder, "maps", "points_of_interest.html"), aoi, poi_table)
 
     edges, _ = grading.grade(network, pois, poi_gdfs, n_steps=n_steps, aoi=aoi)
@@ -281,7 +281,7 @@ def green_areas(
         population: ``"worldpop"`` or ``"census"``.
         map_file: File name of the map in ``folder/maps/``.
         query: Where the green areas come from (default OpenStreetMap; or your own file with
-            :func:`UrbanAccessAnalyzer.grading.query_from_file`).
+            :func:`UrbanAccessAnalyzer.osm.query_from_file`).
         icon: Emoji for the green areas on the map.
         empty_cells: What to do with hexagons that have people but no street: ``"nearest_value"``, ``"relocate_weight"``
             or ``"ignore"`` (see :func:`geohierarchy.handle_empty_cells`).
@@ -296,8 +296,8 @@ def green_areas(
         os.path.join(cache_dir, "pbf", "region.osm.pbf"), aoi=aoi_download, network_type="walk", simplify_distance=30,
         cache_dir=os.path.join(cache_dir, "networks"),
     )
-    poi_gdfs = grading.fetch_pois(pois, aoi_download, crs=network.crs)
-    poi_table = grading.poi_table(pois, poi_gdfs)
+    poi_gdfs = osm.fetch_all(pois, aoi_download, crs=network.crs)
+    poi_table = osm.table(pois, poi_gdfs)
     edges, _ = grading.grade(network, pois, poi_gdfs, n_steps=n_steps, aoi=aoi)
     edges.to_file(os.path.join(folder, "green_areas_streets.gpkg"))
 
@@ -322,7 +322,7 @@ def school_modes(
 
     Args:
         network: Street network (it must allow walking, cycling and driving).
-        schools: School points (see :func:`UrbanAccessAnalyzer.grading.fetch_pois`).
+        schools: School points (see :func:`UrbanAccessAnalyzer.osm.fetch_all`).
         distance_steps: Distance to the nearest school (closest first), one per mode.
         modes: Name of the mode that reaches each distance.
         max_snap_dist: Max distance (m) from a school to the nearest street.
@@ -408,7 +408,7 @@ def school_access(
         modes: Name of the mode that reaches each distance (emoji + name).
         mode_colors: Color of each mode on the map.
         query: Where the schools come from (default OpenStreetMap; or your own file with
-            :func:`UrbanAccessAnalyzer.grading.query_from_file`).
+            :func:`UrbanAccessAnalyzer.osm.query_from_file`).
         icon: Emoji for the schools on the map.
         h3_resolution: H3 resolution (10 is ~0.015 km2).
         population: ``"worldpop"`` or ``"census"``.
@@ -425,9 +425,8 @@ def school_access(
         os.path.join(cache_dir, "pbf", "region.osm.pbf"), aoi=aoi_download, network_type="walk+bike+primary",
         simplify_distance=30, cache_dir=os.path.join(cache_dir, "networks"),
     )
-    school = {"name": "schools", "query": query, "geometry": "Point", "importance": 1, "max_distance": 1, "icon": icon}
-    schools = grading.fetch_pois([school], aoi_download, crs=network.crs)["schools"]
-    poi_table = grading.poi_table([school], {"schools": schools})
+    schools = osm.fetch(query, aoi_download, crs=network.crs)  # a GeoDataFrame with the schools
+    poi_table = osm.pins(schools, "schools", icon)
 
     edges = school_modes(network, schools, distance_steps, modes)
     edges.to_file(os.path.join(folder, "school_streets.gpkg"))

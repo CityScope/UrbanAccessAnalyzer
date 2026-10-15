@@ -620,11 +620,11 @@ def ipyleaflet_drawable_map(m=None, center=[0, 0], zoom=11, height="800px"):
             layout={'height': height}
         )
 
-        m.add_layer(ipyleaflet.TileLayer(
-            url="https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-            name="OpenStreetMap",
-            attribution="&copy; OpenStreetMap contributors",
-        ))
+        from .aoi_selector import _openfreemap_layer
+
+        background = _openfreemap_layer()
+        if background is not None:
+            m.add_layer(background)
 
     draw_control = DrawControl(
         rectangle={"shapeOptions": {"color": "red"}},
@@ -683,7 +683,7 @@ def save_poi_map(path: str, aoi: gpd.GeoDataFrame, pois: gpd.GeoDataFrame) -> fo
         path: Output ``.html`` file (folders are created).
         aoi: Study area.
         pois: Table with ``type``, ``name`` and ``icon`` columns, see
-            :func:`UrbanAccessAnalyzer.grading.poi_table`.
+            :func:`UrbanAccessAnalyzer.osm.table`.
     """
     import os
 

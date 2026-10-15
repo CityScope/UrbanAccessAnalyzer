@@ -88,3 +88,10 @@ def test_geocoding_gives_up_with_a_clear_error(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda s: None)
     with pytest.raises(RuntimeError, match="did not answer after 3 attempts"):
         aoi_selector.utils.get_city_geometry("Alcoy")
+
+
+def test_map_has_no_default_openstreetmap_layer():
+    sel = aoi_selector.AoiSelector("Alcoy", PLACE)
+    urls = [getattr(layer, "url", "") or "" for layer in sel.map.layers]
+    assert not any("openstreetmap.org/" in u and "{z}" in u for u in urls)  # only OpenFreeMap (or nothing offline)
+    assert "poi" in aoi_selector.BASEMAP_STYLES and aoi_selector.BASEMAP_STYLES["poi"]["opacity"] == 0
