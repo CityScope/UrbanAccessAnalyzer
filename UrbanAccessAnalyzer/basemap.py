@@ -53,20 +53,29 @@ class MapLibreBasemap(MacroElement):
                 try { var c = document.createElement('canvas'); return !!(c.getContext('webgl2') || c.getContext('webgl')); }
                 catch (e) { return false; }
             }
-            // MapLibre vector background; if it cannot start (blocked script, no WebGL), use plain OpenStreetMap tiles.
+            // Plain OpenStreetMap tiles always go underneath: they are what you see if the vector background cannot
+            // draw (blocked scripts or workers, no WebGL, notebook sandboxes). The MapLibre vector style goes on top.
+            L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19, attribution: '&copy; OpenStreetMap contributors', zIndex: -1
+            }).addTo(map);
             if (typeof L.maplibreGL === 'function' && typeof maplibregl !== 'undefined' && hasWebGL()) {
                 try {
-                    L.maplibreGL({
+                    var gl = L.maplibreGL({
                         style: {{ this.style|tojson }},
                         attribution: {{ this.attribution|tojson }},
                         pane: {{ this.pane|tojson }}
                     }).addTo(map);
-                    return;
-                } catch (e) { console.warn('MapLibre background failed, using OpenStreetMap tiles', e); }
+                    // A style paints a solid background even if its tiles never load (e.g. blocked workers): if no
+                    // vector tile arrives in a few seconds, drop the vector layer so the OpenStreetMap tiles show.
+                    var tilesLoaded = false, dropGl = function() {
+                        if (!tilesLoaded && map.hasLayer(gl)) { map.removeLayer(gl); console.warn('MapLibre tiles did not load, showing OpenStreetMap tiles'); }
+                    };
+                    var mgl = gl.getMaplibreMap();
+                    mgl.on('sourcedata', function(e) { if (e.tile) { tilesLoaded = true; } });
+                    mgl.on('error', function() { setTimeout(dropGl, 1500); });
+                    setTimeout(dropGl, 8000);
+                } catch (e) { console.warn('MapLibre background failed, showing OpenStreetMap tiles', e); }
             }
-            L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
-            }).addTo(map);
         })();
         {% endmacro %}
         """

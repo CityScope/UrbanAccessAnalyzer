@@ -849,3 +849,24 @@ def tag_query(key: str, value: str):
 
     _query.__name__ = f"{key}_{value}".replace("*", "any")
     return _query
+
+
+def overpass(query: str):
+    """Build a POI query function from Overpass QL: a short filter or a full query.
+
+    - A **filter**, e.g. ``'nwr["amenity"~"hospital|clinic"]'`` (``nwr`` = nodes, ways and relations). The
+      download area and the output statements are added for you.
+    - A **full query** that contains the ``{{bbox}}`` placeholder (replaced by the download area).
+
+    Overpass QL reference: https://wiki.openstreetmap.org/wiki/Overpass_API/Overpass_QL; try queries at
+    https://overpass-turbo.eu/. The result has the same shape as :func:`tag_query`.
+    """
+    full = query if "{{bbox}}" in query else (
+        f"[out:json][timeout:25];{query.rstrip('; ')}({{{{bbox}}}});(._;>;);out body;"
+    )
+
+    def _query(bounds) -> pl.DataFrame:
+        return overpass_query(full, bounds)
+
+    _query.__name__ = "overpass_query_custom"
+    return _query

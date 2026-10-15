@@ -123,6 +123,34 @@ class StreetNetwork:
         simplify_distance: Optional[float] = None,
         ignore_oneway: bool = False,
         crop_buffer_m: float = 500.0,
+        cache_dir: Optional[str] = None,
+    ) -> "StreetNetwork":
+        """Like :meth:`_build_from_pbf`, optionally cached in ``cache_dir``.
+
+        With ``cache_dir`` the built network is saved in ``cache_dir/network_<key>/`` (the key comes from the
+        area and the settings: :func:`UrbanAccessAnalyzer.utils.aoi_key`) and loaded from there next time, which
+        skips reading the PBF and simplifying. Delete that folder to rebuild (for example after a newer PBF).
+        All other arguments are described in :meth:`_build_from_pbf`.
+        """
+        if cache_dir is None or aoi is None:
+            return cls._build_from_pbf(pbf_path, aoi, network_type, simplify_distance, ignore_oneway, crop_buffer_m)
+        gdf = aoi.gdf if isinstance(aoi, AreaOfInterest) else aoi
+        cached = os.path.join(cache_dir, "network_" + utils.aoi_key(gdf, network_type, simplify_distance, ignore_oneway, crop_buffer_m))
+        if os.path.isfile(os.path.join(cached, "meta.txt")):
+            return cls.load(cached)
+        network = cls._build_from_pbf(pbf_path, aoi, network_type, simplify_distance, ignore_oneway, crop_buffer_m)
+        network.save(cached)
+        return network
+
+    @classmethod
+    def _build_from_pbf(
+        cls,
+        pbf_path: str,
+        aoi: Optional[AreaOfInterest] = None,
+        network_type: str = "walk",
+        simplify_distance: Optional[float] = None,
+        ignore_oneway: bool = False,
+        crop_buffer_m: float = 500.0,
     ) -> "StreetNetwork":
         """Build a street network from a local (or Geofabrik-downloaded) PBF file.
 

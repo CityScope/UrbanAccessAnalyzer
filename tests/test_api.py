@@ -99,3 +99,21 @@ def test_compute_accessibility_pools_multiple_poi_kinds(monkeypatch, sample_pbf_
     assert points.df.columns == ["geometry"]  # only geometry kept when pooling
     assert isinstance(gdf, gpd.GeoDataFrame)
     assert "access_score" in gdf.columns
+
+
+def test_street_network_cache_is_keyed_by_area_and_reused(tmp_path, sample_pbf_path, sample_aoi, monkeypatch):
+    import geopandas as gpd
+    import shapely
+    from UrbanAccessAnalyzer import api, osm_io
+
+    cache = str(tmp_path / "cache")
+    first = api.StreetNetwork.from_pbf(sample_pbf_path, aoi=sample_aoi, network_type="all", cache_dir=cache)
+    assert len(list((tmp_path / "cache").glob("network_*/meta.txt"))) == 1
+
+    monkeypatch.setattr(osm_io, "load_pbf", lambda *a, **k: (_ for _ in ()).throw(AssertionError("PBF read again")))
+    again = api.StreetNetwork.from_pbf(sample_pbf_path, aoi=sample_aoi, network_type="all", cache_dir=cache)  # from the cache
+    assert again.edges.height == first.edges.height and again.crs == first.crs
+
+    other = gpd.GeoDataFrame(geometry=[shapely.box(-0.237, 51.763, -0.230, 51.768)], crs=4326)  # another area: not reused
+    with pytest.raises(AssertionError, match="PBF read again"):
+        api.StreetNetwork.from_pbf(sample_pbf_path, aoi=other, network_type="all", cache_dir=cache)

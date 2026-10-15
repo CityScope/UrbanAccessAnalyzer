@@ -65,6 +65,9 @@ def report(
     pois: Optional[gpd.GeoDataFrame] = None,
     categories: Optional[dict] = None,
     categorical_group: Optional[str] = None,
+    empty_cells: str = "nearest_value",
+    empty_max_distance: Optional[float] = None,
+    cache_dir: str = "cache",
     **map_kwargs,
 ):
     """Last step of every workflow: hexagons + population, map, and statistics.
@@ -85,11 +88,18 @@ def report(
         pois: POI table drawn as emoji pins.
         categories: ``{label: color}`` when ``score`` is a text column (a mode...).
         categorical_group: Text column of the hexagons to count people by (instead of score bands).
+        empty_cells: What to do with hexagons that have people but no street: ``"nearest_value"`` (take the
+            scores of the nearest hexagon with streets), ``"relocate_weight"`` (move their people there) or
+            ``"ignore"`` (leave them without score). See :func:`geohierarchy.handle_empty_cells`.
+        empty_max_distance: Meters, center to center, for ``empty_cells`` (``"relocate_weight"``: default 300).
 
     Returns:
         ``(hexes, stats, map)``.
     """
-    hexes = h3_population.h3_with_population(edges, aoi, columns, h3_resolution, population, kids_only=kids_only)
+    hexes = h3_population.h3_with_population(
+        edges, aoi, columns, h3_resolution, population, kids_only=kids_only, empty_cells=empty_cells, max_distance=empty_max_distance,
+        folder=os.path.join(cache_dir, "population"),
+    )
     return finish(hexes, edges, aoi, folder, labels, score, map_file, bands, band_labels, pois, categories,
                   categorical_group, **map_kwargs)
 
@@ -109,6 +119,41 @@ def finish(hexes, edges, aoi, folder, labels, score, map_file, bands=None, band_
     return hexes, stats, m
 
 
+def walkability_results(
+    edges: gpd.GeoDataFrame,
+    aoi: gpd.GeoDataFrame,
+    folder: str,
+    pois: Sequence[dict],
+    poi_table: Optional[gpd.GeoDataFrame] = None,
+    h3_resolution: int = 10,
+    population: str = "worldpop",
+    map_file: str = "walkability_map.html",
+    label: str = "🚶 Walkability (0-100)",
+    empty_cells: str = "nearest_value",
+    empty_max_distance: Optional[float] = None,
+    cache_dir: str = "cache",
+):
+    """Hexagons + population, map and statistics of a walkability score (see :func:`grading.grade`).
+
+    Args:
+        empty_cells: What to do with hexagons that have people but no street: ``"nearest_value"`` (take the
+            scores of the nearest hexagon with streets), ``"relocate_weight"`` (move their people there) or
+            ``"ignore"`` (leave them without score). See :func:`geohierarchy.handle_empty_cells`.
+        empty_max_distance: Meters, center to center, for ``empty_cells`` (``"relocate_weight"``: default 300).
+        cache_dir: Folder where downloads are kept and reused (street networks, regional extracts, population).
+
+    Returns:
+        ``(hexes, stats, map)``: ``stats`` counts people by walkability band.
+    """
+    labels = {"population": "👥 Population", "access_score": label,
+              **{p["name"]: f"{p.get('icon', '📍')} {p['name']} (0-100)" for p in pois}}
+    return report(
+        edges, aoi, folder, [*(p["name"] for p in pois), "access_score"], labels, "access_score", map_file,
+        h3_resolution, population, pois=poi_table, empty_cells=empty_cells, empty_max_distance=empty_max_distance,
+        cache_dir=cache_dir,
+    )
+
+
 def walkability(
     place: Union[str, gpd.GeoDataFrame],
     pois: Sequence[dict],
@@ -119,6 +164,9 @@ def walkability(
     population: str = "worldpop",
     map_file: str = "walkability_map.html",
     label: str = "🚶 Walkability (0-100)",
+    empty_cells: str = "nearest_value",
+    empty_max_distance: Optional[float] = None,
+    cache_dir: str = "cache",
 ) -> Result:
     """Walkability: how close are the streets to several types of places (shops, schools, parks...).
 
@@ -133,26 +181,77 @@ def walkability(
         population: ``"worldpop"`` or ``"census"``.
         map_file: File name of the map in ``folder/maps/``.
         label: Name of the score on the map.
+        empty_cells: What to do with hexagons that have people but no street: ``"nearest_value"``, ``"relocate_weight"``
+            or ``"ignore"`` (see :func:`geohierarchy.handle_empty_cells`).
+        empty_max_distance: Meters, center to center, for ``empty_cells`` (``"relocate_weight"``: default 300).
+        cache_dir: Folder where downloads are kept and reused (street networks, regional extracts, population).
     """
     aoi, folder = _setup(place, folder)
     aoi_download = utils.buffer_gdf(aoi, download_buffer)
     network = api.StreetNetwork.from_pbf(
-        os.path.join(folder, "region.osm.pbf"), aoi=aoi_download, network_type="walk", simplify_distance=30
+        os.path.join(cache_dir, "pbf", "region.osm.pbf"), aoi=aoi_download, network_type="walk", simplify_distance=30,
+        cache_dir=os.path.join(cache_dir, "networks"),
     )
     poi_gdfs = grading.fetch_pois(pois, aoi_download, crs=network.crs)  # if it fails, run again: Overpass can be busy
     poi_table = grading.poi_table(pois, poi_gdfs)
     poi_map = plotting.save_poi_map(os.path.join(folder, "maps", "points_of_interest.html"), aoi, poi_table)
 
     edges, _ = grading.grade(network, pois, poi_gdfs, n_steps=n_steps, aoi=aoi)
-    edges.to_file(os.path.join(folder, "access_streets.gpkg"))
+    edges.to_file(os.path.join(folder, "walkability_streets.gpkg"))
 
-    labels = {"population": "👥 Population", "access_score": label,
-              **{p["name"]: f"{p.get('icon', '📍')} {p['name']} (0-100)" for p in pois}}
-    hexes, stats, m = report(
-        edges, aoi, folder, [*(p["name"] for p in pois), "access_score"], labels, "access_score", map_file,
-        h3_resolution, population, pois=poi_table,
+    hexes, stats, m = walkability_results(
+        edges, aoi, folder, pois, poi_table, h3_resolution, population, map_file, label, empty_cells, empty_max_distance,
+        cache_dir,
     )
     return Result(folder, aoi, edges, hexes, stats, m, poi_map, poi_table)
+
+
+def green_bands(max_distance: float, n_steps: int):
+    """Score limits and names of the walking-time bands for green space (~4.8 km/h = 80 m/min).
+
+    Returns:
+        ``(limits, names)`` for :func:`UrbanAccessAnalyzer.h3_population.population_by_band`, e.g. for 1200 m
+        and 3 steps: ``"farther"``, ``"within ~15 min"``, ``"within ~10 min"``, ``"within ~5 min"``.
+    """
+    minutes = [round(max_distance / n_steps * k / 80) for k in range(1, n_steps + 1)]
+    limits = [0, 1, *(100 * k / n_steps for k in range(1, n_steps)), 100]
+    return limits, ["farther", *(f"within ~{m} min" for m in reversed(minutes))]
+
+
+def green_results(
+    edges: gpd.GeoDataFrame,
+    aoi: gpd.GeoDataFrame,
+    folder: str,
+    max_distance: float,
+    n_steps: int,
+    poi_table: Optional[gpd.GeoDataFrame] = None,
+    h3_resolution: int = 10,
+    population: str = "worldpop",
+    map_file: str = "green_areas_map.html",
+    icon: str = "🌳",
+    empty_cells: str = "nearest_value",
+    empty_max_distance: Optional[float] = None,
+    cache_dir: str = "cache",
+):
+    """Hexagons + population, map and statistics of the access to green space (see :func:`grading.grade`).
+
+    Args:
+        empty_cells: What to do with hexagons that have people but no street: ``"nearest_value"`` (take the
+            scores of the nearest hexagon with streets), ``"relocate_weight"`` (move their people there) or
+            ``"ignore"`` (leave them without score). See :func:`geohierarchy.handle_empty_cells`.
+        empty_max_distance: Meters, center to center, for ``empty_cells`` (``"relocate_weight"``: default 300).
+        cache_dir: Folder where downloads are kept and reused (street networks, regional extracts, population).
+
+    Returns:
+        ``(hexes, stats, map)``: ``stats`` counts people by walking time to the nearest green area.
+    """
+    limits, band_labels = green_bands(max_distance, n_steps)
+    labels = {"population": "👥 Population", "access_score": f"{icon} Access to green space (0-100)"}
+    return report(
+        edges, aoi, folder, ["access_score"], labels, "access_score", map_file, h3_resolution, population,
+        bands=limits, band_labels=band_labels, pois=poi_table, empty_cells=empty_cells, empty_max_distance=empty_max_distance,
+        cache_dir=cache_dir,
+    )
 
 
 def green_areas(
@@ -166,6 +265,9 @@ def green_areas(
     map_file: str = "green_areas_map.html",
     query=osm_io.green_areas,
     icon: str = "🌳",
+    empty_cells: str = "nearest_value",
+    empty_max_distance: Optional[float] = None,
+    cache_dir: str = "cache",
 ) -> Result:
     """Access to green space (parks, gardens, forests...) on foot, and who lives near it.
 
@@ -181,28 +283,101 @@ def green_areas(
         query: Where the green areas come from (default OpenStreetMap; or your own file with
             :func:`UrbanAccessAnalyzer.grading.query_from_file`).
         icon: Emoji for the green areas on the map.
+        empty_cells: What to do with hexagons that have people but no street: ``"nearest_value"``, ``"relocate_weight"``
+            or ``"ignore"`` (see :func:`geohierarchy.handle_empty_cells`).
+        empty_max_distance: Meters, center to center, for ``empty_cells`` (``"relocate_weight"``: default 300).
+        cache_dir: Folder where downloads are kept and reused (street networks, regional extracts, population).
     """
     aoi, folder = _setup(place, folder)
     pois = [{"name": "green_areas", "query": query, "geometry": "Polygon", "importance": 1,
              "max_distance": max_distance, "icon": icon}]
     aoi_download = utils.buffer_gdf(aoi, download_buffer)
     network = api.StreetNetwork.from_pbf(
-        os.path.join(folder, "region.osm.pbf"), aoi=aoi_download, network_type="walk", simplify_distance=30
+        os.path.join(cache_dir, "pbf", "region.osm.pbf"), aoi=aoi_download, network_type="walk", simplify_distance=30,
+        cache_dir=os.path.join(cache_dir, "networks"),
     )
     poi_gdfs = grading.fetch_pois(pois, aoi_download, crs=network.crs)
     poi_table = grading.poi_table(pois, poi_gdfs)
     edges, _ = grading.grade(network, pois, poi_gdfs, n_steps=n_steps, aoi=aoi)
-    edges.to_file(os.path.join(folder, "access_streets.gpkg"))
+    edges.to_file(os.path.join(folder, "green_areas_streets.gpkg"))
 
-    minutes = [round(max_distance / n_steps * k / 80) for k in range(1, n_steps + 1)]  # ~4.8 km/h = 80 m/min
-    limits = [0, 1, *(100 * k / n_steps for k in range(1, n_steps)), 100]
-    band_labels = ["farther", *(f"within ~{m} min" for m in reversed(minutes))]
-    labels = {"population": "👥 Population", "access_score": f"{icon} Access to green space (0-100)"}
-    hexes, stats, m = report(
-        edges, aoi, folder, ["access_score"], labels, "access_score", map_file, h3_resolution, population,
-        bands=limits, band_labels=band_labels, pois=poi_table,
+    hexes, stats, m = green_results(
+        edges, aoi, folder, max_distance, n_steps, poi_table, h3_resolution, population, map_file, icon,
+        empty_cells, empty_max_distance, cache_dir,
     )
     return Result(folder, aoi, edges, hexes, stats, m, None, poi_table)
+
+
+def school_modes(
+    network: api.StreetNetwork,
+    schools: gpd.GeoDataFrame,
+    distance_steps: Sequence[float] = (1000, 2500, 10000),
+    modes: Sequence[str] = ("🚶 walk", "🚲 bike", "🚌 bus/car"),
+    max_snap_dist: float = 130,
+) -> gpd.GeoDataFrame:
+    """Isochrones from the schools: the mode that reaches the nearest school from every street.
+
+    Walking along the streets from every school, each street gets the first mode whose distance reaches
+    it (``distance_steps[0]`` -> ``modes[0]``, ...); streets beyond the last distance are not reached.
+
+    Args:
+        network: Street network (it must allow walking, cycling and driving).
+        schools: School points (see :func:`UrbanAccessAnalyzer.grading.fetch_pois`).
+        distance_steps: Distance to the nearest school (closest first), one per mode.
+        modes: Name of the mode that reaches each distance.
+        max_snap_dist: Max distance (m) from a school to the nearest street.
+
+    Returns:
+        Street edges with a ``mode`` column.
+    """
+    analyzer = api.AccessibilityAnalyzer(network, api.PointsOfInterest.from_gdf(schools))
+    _, edge_access = analyzer.run(
+        distance_matrix=list(distance_steps), poi_score_col=None, access_score_values=list(modes),
+        max_dist=max_snap_dist, verbose=False,
+    )
+    return analyzer.to_gdf(edge_access).rename(columns={"access_score": "mode"})
+
+
+def school_results(
+    edges: gpd.GeoDataFrame,
+    aoi: gpd.GeoDataFrame,
+    folder: str,
+    modes: Sequence[str],
+    mode_colors: Sequence[str],
+    poi_table: Optional[gpd.GeoDataFrame] = None,
+    h3_resolution: int = 10,
+    population: str = "worldpop",
+    kids_only: bool = False,
+    map_file: str = "school_access_map.html",
+    empty_cells: str = "nearest_value",
+    empty_max_distance: Optional[float] = None,
+    cache_dir: str = "cache",
+):
+    """Hexagons + population, map and statistics of the school-access modes (see :func:`school_modes`).
+
+    Args:
+        empty_cells: What to do with hexagons that have people but no street: ``"nearest_value"`` (take the
+            scores of the nearest hexagon with streets), ``"relocate_weight"`` (move their people there) or
+            ``"ignore"`` (leave them without score). See :func:`geohierarchy.handle_empty_cells`.
+        empty_max_distance: Meters, center to center, for ``empty_cells`` (``"relocate_weight"``: default 300).
+        cache_dir: Folder where downloads are kept and reused (street networks, regional extracts, population).
+
+    Returns:
+        ``(hexes, stats, map)``: ``stats`` counts people by the mode that reaches their nearest school.
+    """
+    edges = edges.copy()
+    # Hexagons average numbers: 1 = first mode (walk) ... n = last mode; turned back into names after.
+    edges["rank"] = edges["mode"].map({mode: i for i, mode in enumerate(modes, 1)})
+    hexes = h3_population.h3_with_population(
+        edges, aoi, ["rank"], h3_resolution, population, kids_only=kids_only,
+        empty_cells=empty_cells, max_distance=empty_max_distance, folder=os.path.join(cache_dir, "population"),
+    )
+    hexes["mode"] = h3_population.rank_to_label(hexes["rank"], list(modes))
+    labels = {"population": "👥 Population", "mode": "🚦 Nearest school reachable by"}
+    return finish(
+        hexes, edges, aoi, folder, labels, "mode", map_file, pois=poi_table,
+        categories=dict(zip(modes, mode_colors)), categorical_group="mode",
+    )
 
 
 def school_access(
@@ -218,6 +393,9 @@ def school_access(
     population: str = "worldpop",
     kids_only: bool = False,
     map_file: str = "school_access_map.html",
+    empty_cells: str = "nearest_value",
+    empty_max_distance: Optional[float] = None,
+    cache_dir: str = "cache",
 ) -> Result:
     """Which mode (walk, bike, bus/car) reaches the nearest school from every street, and who lives there.
 
@@ -236,32 +414,26 @@ def school_access(
         population: ``"worldpop"`` or ``"census"``.
         kids_only: Only people under 18 (WorldPop only).
         map_file: File name of the map in ``folder/maps/``.
+        empty_cells: What to do with hexagons that have people but no street: ``"nearest_value"``, ``"relocate_weight"``
+            or ``"ignore"`` (see :func:`geohierarchy.handle_empty_cells`).
+        empty_max_distance: Meters, center to center, for ``empty_cells`` (``"relocate_weight"``: default 300).
+        cache_dir: Folder where downloads are kept and reused (street networks, regional extracts, population).
     """
     aoi, folder = _setup(place, folder)
     aoi_download = utils.buffer_gdf(aoi, download_buffer)
     network = api.StreetNetwork.from_pbf(
-        os.path.join(folder, "region.osm.pbf"), aoi=aoi_download, network_type="walk+bike+primary",
-        simplify_distance=30,
+        os.path.join(cache_dir, "pbf", "region.osm.pbf"), aoi=aoi_download, network_type="walk+bike+primary",
+        simplify_distance=30, cache_dir=os.path.join(cache_dir, "networks"),
     )
     school = {"name": "schools", "query": query, "geometry": "Point", "importance": 1, "max_distance": 1, "icon": icon}
     schools = grading.fetch_pois([school], aoi_download, crs=network.crs)["schools"]
     poi_table = grading.poi_table([school], {"schools": schools})
 
-    analyzer = api.AccessibilityAnalyzer(network, api.PointsOfInterest.from_gdf(schools))
-    _, edge_access = analyzer.run(
-        distance_matrix=list(distance_steps), poi_score_col=None, access_score_values=list(modes),
-        max_dist=130, verbose=False,
-    )
-    edges = analyzer.to_gdf(edge_access).rename(columns={"access_score": "mode"})
-    edges.to_file(os.path.join(folder, "access_streets.gpkg"))
+    edges = school_modes(network, schools, distance_steps, modes)
+    edges.to_file(os.path.join(folder, "school_streets.gpkg"))
 
-    # Hexagons average numbers: 1 = first mode (walk) ... n = last mode; turned back into names after.
-    edges["rank"] = edges["mode"].map({mode: i for i, mode in enumerate(modes, 1)})
-    hexes = h3_population.h3_with_population(edges, aoi, ["rank"], h3_resolution, population, kids_only=kids_only)
-    hexes["mode"] = h3_population.rank_to_label(hexes["rank"], list(modes))
-    labels = {"population": "👥 Population", "mode": "🚦 Nearest school reachable by"}
-    hexes, stats, m = finish(
-        hexes, edges, aoi, folder, labels, "mode", map_file, pois=poi_table,
-        categories=dict(zip(modes, mode_colors)), categorical_group="mode",
+    hexes, stats, m = school_results(
+        edges, aoi, folder, modes, mode_colors, poi_table, h3_resolution, population, kids_only, map_file,
+        empty_cells, empty_max_distance, cache_dir,
     )
     return Result(folder, aoi, edges, hexes, stats, m, None, poi_table)

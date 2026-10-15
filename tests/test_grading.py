@@ -93,3 +93,54 @@ def test_popup_js_categories():
 
     js = plotting.popup_js({"mode_rank": "Mode"}, categories={"mode_rank": ["walk", "bike"]})
     assert '"walk"' in js and "Math.round" in js
+
+
+def test_tiers_table():
+    specs = [
+        {"name": "a", "query": None, "geometry": "Point", "importance": 3, "max_distance": 1000, "icon": "🛒"},
+        {"name": "b", "query": None, "geometry": "Point", "importance": 1, "max_distance": 500},
+    ]
+    t = grading.tiers_table(specs, n_steps=4)
+    a = t[t["type"] == "a"]
+    assert list(a["within (m)"]) == [250, 500, 750, 1000] and list(a["score"]) == [100, 75, 50, 25]
+    assert set(a["weight %"]) == {75.0} and set(t[t["type"] == "b"]["icon"]) == {"📍"}
+
+
+def test_poi_sources(tmp_path):
+    import geopandas as gpd
+    import shapely
+    from UrbanAccessAnalyzer import osm_io
+
+    assert grading.poi("s", "schools")["query"] is osm_io.schools
+    p = grading.poi("parks", "green_areas", importance=2, icon="🌳")
+    assert p["geometry"] == "Polygon" and p["importance"] == 2 and p["icon"] == "🌳"
+    assert grading.poi("d", ("amenity", "dentist"))["query"].__name__ == "amenity_dentist"
+    f = lambda b: None
+    assert grading.poi("c", f, geometry="Polygon")["query"] is f
+
+    path = tmp_path / "x.gpkg"
+    gpd.GeoDataFrame({"n": ["a"]}, geometry=[shapely.Point(0, 0)], crs=4326).to_file(path)
+    mine = grading.poi("mine", str(path), name_column="n")
+    assert mine["geometry"] == "Point" and callable(mine["query"])
+    for bad in (123, "no_such_file.gpkg"):
+        try:
+            grading.poi("x", bad)
+        except (TypeError, FileNotFoundError):
+            pass
+        else:
+            raise AssertionError(bad)
+
+
+def test_overpass_filter_becomes_full_query(monkeypatch):
+    import geopandas as gpd
+    import polars as pl
+    import shapely
+    from UrbanAccessAnalyzer import osm_io
+
+    seen = {}
+    monkeypatch.setattr(osm_io, "overpass_query", lambda q, b: seen.setdefault("q", q) and pl.DataFrame())
+    bounds = gpd.GeoDataFrame(geometry=[shapely.box(0, 0, 1, 1)], crs=4326)
+    grading.poi("c", 'nwr["amenity"~"hospital|clinic"]')["query"](bounds)
+    assert '[out:json]' in seen["q"] and '{{bbox}}' in seen["q"] and 'hospital|clinic' in seen["q"] and "out body" in seen["q"]
+    full = '[out:json];node["a"="b"]({{bbox}});out;'
+    assert grading.poi("f", full)["query"].__name__ == "overpass_query_custom"

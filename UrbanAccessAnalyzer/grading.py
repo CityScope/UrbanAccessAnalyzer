@@ -257,3 +257,92 @@ def poi_table(specs: Sequence[dict], pois: dict[str, gpd.GeoDataFrame]) -> gpd.G
     if not parts:
         return gpd.GeoDataFrame({"type": [], "name": [], "icon": []}, geometry=[], crs=4326)
     return pd.concat(parts, ignore_index=True)
+
+
+def tiers_table(specs: Sequence[dict], n_steps: int = 5) -> pd.DataFrame:
+    """How each type of POI is scored: for every distance step, the score of the streets inside it.
+
+    A street within the first step of a POI scores 100; each next step scores 100/``n_steps`` less, up to
+    ``max_distance``; beyond it the score is 0. ``weight %`` is the ``importance`` share in the final score.
+
+    Returns:
+        One row per POI type and step: ``type``, ``icon``, ``within (m)``, ``score`` and ``weight %``.
+    """
+    _check_specs(specs)
+    total = float(sum(s["importance"] for s in specs))
+    rows = []
+    for s in specs:
+        for j in range(1, n_steps + 1):
+            rows.append({
+                "type": s["name"], "icon": s.get("icon", "📍"),
+                "within (m)": round(s["max_distance"] * j / n_steps),
+                "score": round(100 * (n_steps - j + 1) / n_steps),
+                "weight %": round(100 * s["importance"] / total, 1),
+            })
+    return pd.DataFrame(rows)
+
+
+OSM_KINDS = (
+    "schools", "healthcare", "groceries", "shops", "restaurants", "libraries",
+    "pharmacies", "gyms", "cinemas", "bus_stops", "green_areas",
+)
+
+
+def poi(
+    name: str,
+    source,
+    geometry: Optional[str] = None,
+    importance: float = 5,
+    max_distance: float = 1000,
+    icon: str = "📍",
+    name_column: Optional[str] = None,
+) -> dict:
+    """One type of place for :func:`fetch_pois` / :func:`grade`, from almost any source.
+
+    ``source`` can be:
+
+    - a ready-made OSM kind: ``"schools"``, ``"groceries"``, ``"green_areas"``... (see :data:`OSM_KINDS`)
+    - any OSM tag, as ``(key, value)``: ``("amenity", "dentist")`` (``"*"`` = any value)
+    - your own file of points or polygons (``.gpkg``, ``.geojson``, ``.shp``, ``.parquet``..., any CRS):
+      ``"my_places.gpkg"``. In Google Colab, if the file is not there, a window opens to choose it from
+      your computer.
+    - an **Overpass filter**, for several tags or conditions: ``'nwr["amenity"~"hospital|clinic"]'`` (see
+      :func:`UrbanAccessAnalyzer.osm_io.overpass`)
+    - your own function ``query(bounds) -> table with a WKB geometry column``.
+
+    Args:
+        name: Label of the type (also the output column and the map legend).
+        source: See above.
+        geometry: ``"Point"`` or ``"Polygon"`` (areas such as parks). Default: ``"Polygon"`` for
+            ``"green_areas"``, otherwise ``"Point"``.
+        importance: Weight of this type in the final score (relative to the others).
+        max_distance: Meters walked beyond which the place is worthless.
+        icon: Emoji shown on the maps.
+        name_column: For your own file: the column with the names of the places.
+
+    Returns:
+        The config dict (``name``, ``query``, ``geometry``, ``importance``, ``max_distance``, ``icon``).
+    """
+    from . import osm_io
+
+    if callable(source):
+        query = source
+    elif isinstance(source, (tuple, list)) and len(source) == 2:
+        query = osm_io.tag_query(*source)
+    elif isinstance(source, str) and source in OSM_KINDS:
+        query = getattr(osm_io, source)
+    elif isinstance(source, str) and (source.lstrip().startswith(("nwr", "node", "way", "relation", "[out:")) or "{{bbox}}" in source):
+        query = osm_io.overpass(source)
+    elif isinstance(source, str):
+        query = query_from_file(source, name_column=name_column)
+    else:
+        raise TypeError(f"source must be a kind, a (key, value) OSM tag, an Overpass filter, a file path or a function; got {source!r}")
+    if geometry is None:
+        geometry = "Polygon" if source == "green_areas" else "Point"
+    return {"name": name, "query": query, "geometry": geometry, "importance": importance,
+            "max_distance": max_distance, "icon": icon}
+
+
+def score_summary(edges: gpd.GeoDataFrame, specs: Sequence[dict], score_col: str = "access_score") -> pd.DataFrame:
+    """Summary statistics (0-100) of the score of every type of place and of the final score."""
+    return edges[[s["name"] for s in specs] + [score_col]].describe().round(1)

@@ -1,3 +1,4 @@
+from .aoi_selector import select_aoi
 from .api import (
     AreaOfInterest,
     StreetNetwork,
@@ -6,6 +7,7 @@ from .api import (
 )
 
 __all__ = [
+    "select_aoi",
     "AreaOfInterest",
     "StreetNetwork",
     "PointsOfInterest",

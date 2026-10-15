@@ -83,3 +83,51 @@ def test_points_from_gdf():
 
     g = gpd.GeoDataFrame(geometry=[shapely.box(0, 0, 2, 2)], crs=4326)
     assert api.PointsOfInterest.from_gdf(g).df.height == 1
+
+
+def test_hexagons_without_streets_are_none_then_filled_from_nearest(monkeypatch):
+    import numpy as np
+    import pycensus
+
+    aoi = gpd.GeoDataFrame(geometry=[shapely.box(-0.48, 38.69, -0.47, 38.70)], crs=4326)
+    # one street along the west edge, score 3; people all over the area
+    segs = [shapely.LineString([(-0.4755, 38.6905 + i * 0.0003), (-0.4755, 38.6905 + (i + 1) * 0.0003)]) for i in range(30)]
+    street = gpd.GeoDataFrame({"rank": [3.0] * 30}, geometry=segs, crs=4326).to_crs(32630)  # short edges, like real streets
+
+    def fake_pop(aoi, source="worldpop", **kw):
+        xs, ys = np.meshgrid(np.linspace(-0.4795, -0.4705, 15), np.linspace(38.6905, 38.6995, 15))
+        pts = [shapely.Point(x, y) for x, y in zip(xs.ravel(), ys.ravel())]
+        return gpd.GeoDataFrame({"population": [4.0] * len(pts)}, geometry=pts, crs=4326)
+
+    monkeypatch.setattr(pycensus, "get_population", fake_pop)
+    raw = h3_population.h3_with_population(street, aoi, ["rank"], 10, empty_cells="ignore")
+    assert raw["rank"].isna().sum() > 0 and (raw["rank"] == 0).sum() == 0  # no street -> None, never 0
+    filled = h3_population.h3_with_population(street, aoi, ["rank"], 10)
+    inhabited = filled[filled["population"] > 0]
+    assert inhabited["rank"].notna().all() and set(inhabited["rank"].round(6)) == {3.0}  # nearest street's value
+    assert filled["filled"].sum() > 0 and filled.loc[~filled["filled"] & filled["rank"].notna(), "rank"].gt(0).all()
+    assert filled[filled["population"] == 0]["rank"].isna().all()  # no people, no street: stays empty
+    capped = h3_population.h3_with_population(street, aoi, ["rank"], 10, max_distance=60)
+    assert capped["rank"].isna().sum() > filled["rank"].isna().sum()  # farther hexagons are not filled
+
+
+def test_relocate_weight_method_moves_people_to_hexagons_with_streets(monkeypatch):
+    import numpy as np
+    import pycensus
+
+    aoi = gpd.GeoDataFrame(geometry=[shapely.box(-0.48, 38.69, -0.47, 38.70)], crs=4326)
+    segs = [shapely.LineString([(-0.4755, 38.6905 + i * 0.0003), (-0.4755, 38.6905 + (i + 1) * 0.0003)]) for i in range(30)]
+    street = gpd.GeoDataFrame({"rank": [3.0] * 30}, geometry=segs, crs=4326).to_crs(32630)
+
+    def fake_pop(aoi, source="worldpop", **kw):
+        xs, ys = np.meshgrid(np.linspace(-0.4795, -0.4705, 15), np.linspace(38.6905, 38.6995, 15))
+        pts = [shapely.Point(x, y) for x, y in zip(xs.ravel(), ys.ravel())]
+        return gpd.GeoDataFrame({"population": [4.0] * len(pts)}, geometry=pts, crs=4326)
+
+    monkeypatch.setattr(pycensus, "get_population", fake_pop)
+    ignore = h3_population.h3_with_population(street, aoi, ["rank"], 10, empty_cells="ignore")
+    moved = h3_population.h3_with_population(street, aoi, ["rank"], 10, empty_cells="relocate_weight", max_distance=100000)
+    assert moved["population"].sum() == ignore["population"].sum() and moved.attrs["excluded_weight"] == 0
+    assert (moved.loc[moved["rank"].isna(), "population"] == 0).all()  # everyone now lives where there is a street
+    capped = h3_population.h3_with_population(street, aoi, ["rank"], 10, empty_cells="relocate_weight", max_distance=30)
+    assert capped.attrs["excluded_weight"] > 0 and capped["population"].sum() < ignore["population"].sum()

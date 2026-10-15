@@ -620,14 +620,11 @@ def ipyleaflet_drawable_map(m=None, center=[0, 0], zoom=11, height="800px"):
             layout={'height': height}
         )
 
-        google_hybrid = ipyleaflet.TileLayer(
-            url="https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
-            name="Google Hybrid",
-            attribution="Google",
-            opacity=0.75
-        )
-
-        m.add_layer(google_hybrid)
+        m.add_layer(ipyleaflet.TileLayer(
+            url="https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+            name="OpenStreetMap",
+            attribution="&copy; OpenStreetMap contributors",
+        ))
 
     draw_control = DrawControl(
         rectangle={"shapeOptions": {"color": "red"}},
@@ -936,3 +933,10 @@ def save_access_map(
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     m.save(path)
     return m
+
+
+def plot_streets(edges: gpd.GeoDataFrame, column: str, cmap: str = "RdYlGn", vmin: float = 0, vmax: float = 100, size: float = 7):
+    """Quick static plot of the streets colored by a score column."""
+    ax = edges.plot(column=column, cmap=cmap, vmin=vmin, vmax=vmax, legend=True, figsize=(size, size))
+    ax.set_axis_off()
+    return ax

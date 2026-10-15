@@ -14,19 +14,41 @@ from rapidfuzz import process, fuzz
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 import geopandas as gpd
-from typing import List, Dict, Union
+from typing import List, Dict, Optional, Union
 import shapely
 from shapely.geometry import Polygon, MultiPolygon, Point, shape
 import requests
 
+USER_AGENT = "UrbanAccessAnalyzer/1.0 (https://github.com/CityScope/UrbanAccessAnalyzer)"  # Nominatim asks for an identifying agent
+
+
+def _nominatim_get(params: dict, timeout: float = 30.0, retries: int = 3):
+    """GET the Nominatim search API, retrying timeouts, rate limits (429) and server errors with a growing wait."""
+    import time
+
+    last = None
+    for attempt in range(retries):
+        try:
+            response = requests.get(
+                "https://nominatim.openstreetmap.org/search", params=params,
+                headers={"User-Agent": USER_AGENT}, timeout=timeout,
+            )
+            if response.status_code == 429 or response.status_code >= 500:
+                last = RuntimeError(f"Nominatim answered HTTP {response.status_code}")
+                wait = float(response.headers.get("Retry-After", 0) or 0) or 3.0 * (attempt + 1)
+            else:
+                response.raise_for_status()
+                return response
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last, wait = e, 3.0 * (attempt + 1)
+        if attempt < retries - 1:
+            time.sleep(wait)
+    raise RuntimeError(f"Nominatim did not answer after {retries} attempts: {last}")
+
+
 def geocode(q, results:int=1, buffer:float=0):
     try:
-        r = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": q, "format": "json", "limit": results},
-            headers={"User-Agent": "your_email@example.com"},  # Use a real identifier
-            timeout=8
-        )
+        r = _nominatim_get({"q": q, "format": "json", "limit": results})
         
         data = r.json()
         
@@ -60,33 +82,44 @@ def geocode(q, results:int=1, buffer:float=0):
         print("Error:", e)
         return None
 
-def get_city_geometry(city_name: str) -> gpd.GeoDataFrame:
+def get_city_geometry(city_name: str, cache_dir: Optional[str] = None) -> gpd.GeoDataFrame:
     """Download a place's boundary polygon from OpenStreetMap via Nominatim.
+
+    Timeouts, rate limits and server errors are retried (3 attempts).
 
     Args:
         city_name: Place name/query, e.g. ``"Berlin, Germany"``.
+        cache_dir: If given, the boundary is saved in ``cache_dir/geocode/`` and read from there next time
+            (no request at all, which also avoids Nominatim's rate limits). Delete the file to search again.
 
     Returns:
         Single-row GeoDataFrame with the place's boundary polygon
-        (EPSG:4326). Falls back to nothing (raises) if Nominatim returns no
-        polygon geometry for the query.
+        (EPSG:4326).
 
     Raises:
         ValueError: If no result with a polygon geometry is found.
+        RuntimeError: If Nominatim does not answer.
     """
-    response = requests.get(
-        "https://nominatim.openstreetmap.org/search",
-        params={"q": city_name, "format": "jsonv2", "polygon_geojson": 1, "limit": 1},
-        headers={"User-Agent": "UrbanAccessAnalyzer"},
-        timeout=10,
-    )
-    response.raise_for_status()
+    import hashlib
+
+    cached = None
+    if cache_dir:
+        key = hashlib.sha1(city_name.strip().lower().encode()).hexdigest()[:16]
+        cached = os.path.join(cache_dir, "geocode", f"{key}.geojson")
+        if os.path.isfile(cached):
+            return gpd.read_file(cached).to_crs(4326)
+
+    response = _nominatim_get({"q": city_name, "format": "jsonv2", "polygon_geojson": 1, "limit": 1})
     results = response.json()
     if not results or "geojson" not in results[0]:
         raise ValueError(f"No boundary polygon found for {city_name!r}.")
 
     geom = shape(results[0]["geojson"])
-    return gpd.GeoDataFrame({"display_name": [results[0]["display_name"]]}, geometry=[geom], crs="EPSG:4326")
+    gdf = gpd.GeoDataFrame({"display_name": [results[0]["display_name"]]}, geometry=[geom], crs="EPSG:4326")
+    if cached:
+        os.makedirs(os.path.dirname(cached), exist_ok=True)
+        gdf.to_file(cached, driver="GeoJSON")
+    return gdf
 
 
 def get_geographic_suggestions_from_string(
@@ -291,3 +324,18 @@ def select_file(path: str = "") -> str:
             raise ValueError("No file was selected.")
         return next(iter(uploaded))
     raise FileNotFoundError(f"File not found: {path!r}. Set the path of your file.")
+
+
+def aoi_key(aoi: gpd.GeoDataFrame, *parts) -> str:
+    """Short stable key of an area plus any settings (``parts``): the name of its cache entry.
+
+    The same area (to ~1 m) and settings always give the same key, so a cache is never reused for a different
+    area, even if both are saved under the same place name.
+    """
+    import hashlib
+
+    geom = shapely.set_precision(aoi.to_crs(4326).union_all(), 1e-5)
+    h = hashlib.sha1(shapely.to_wkb(geom))
+    for part in parts:
+        h.update(repr(part).encode())
+    return h.hexdigest()[:12]
