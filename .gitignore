@@ -106,3 +106,4 @@ api_keys.json
 # Test fixtures are code assets: keep them trackable even though they match the types above.
 !tests/**
 __pycache__/
+__pycache__/
