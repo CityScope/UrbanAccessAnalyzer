@@ -8,7 +8,12 @@ Each POI type is described by a small config dict::
         "geometry": "Point",           # "Point" or "Polygon" (e.g. parks)
         "importance": 8,               # relative weight in the final score
         "max_distance": 1500,          # meters walked beyond which the POI is worthless
+        "icon": "🛒",                  # optional emoji shown on the maps
     }
+
+``query`` can be an OSM query (:mod:`UrbanAccessAnalyzer.osm_io`,
+:func:`UrbanAccessAnalyzer.osm_io.tag_query`) or your own file
+(:func:`query_from_file`).
 
 Grading, per POI type:
 
@@ -51,6 +56,38 @@ def _check_specs(specs: Sequence[dict]) -> None:
             raise ValueError(f"POI config {s.get('name')!r} is missing {missing}")
         if s["geometry"] not in ("Point", "Polygon"):
             raise ValueError(f"POI {s['name']!r}: geometry must be 'Point' or 'Polygon', got {s['geometry']!r}")
+
+
+def query_from_file(path: str, name_column: Optional[str] = None) -> Callable:
+    """Build a POI ``query`` from your own vector file (points or polygons).
+
+    Any format GeoPandas reads works: GeoPackage, GeoJSON, Shapefile, GeoParquet,
+    FlatGeobuf, ... in any CRS. Only the features inside the download area are kept.
+
+    Args:
+        path: Path to the file.
+        name_column: Column with the POI names (shown on the maps), if any.
+
+    Returns:
+        A function ``query(bounds)`` to use as the ``"query"`` of a POI config.
+    """
+    from . import geometry_ops
+
+    def _query(bounds: gpd.GeoDataFrame) -> pl.DataFrame:
+        gdf = geometry_ops.read_geofile(path, bounds=bounds)
+        if gdf.crs is None:
+            raise ValueError(f"{path} has no CRS; set one first, e.g. gdf.set_crs(4326).to_file(...)")
+        gdf = gdf.to_crs(4326)
+        gdf = gdf[gdf.geometry.intersects(bounds.to_crs(4326).union_all())]
+        df = pl.DataFrame({"geometry": shapely.to_wkb(gdf.geometry.to_numpy())}).with_columns(
+            pl.col("geometry").cast(pl.Binary)
+        )
+        if name_column:
+            df = df.with_columns(pl.Series("name", gdf[name_column].astype(str).to_numpy()))
+        return df
+
+    _query.__name__ = "file_" + str(path).replace("/", "_")
+    return _query
 
 
 def fetch_pois(
@@ -186,3 +223,29 @@ def grade(
     geom = shapely.from_wkb(edges["geometry_wkb"].to_numpy())
     edges_gdf = gpd.GeoDataFrame(edges.drop("geometry_wkb").to_pandas(), geometry=geom, crs=network.crs)
     return edges_gdf, network
+
+
+def poi_table(specs: Sequence[dict], pois: dict[str, gpd.GeoDataFrame]) -> gpd.GeoDataFrame:
+    """One EPSG:4326 table of all POIs for mapping, with columns ``type``, ``name``, ``icon``.
+
+    ``icon`` is the config's optional ``"icon"`` emoji (default ``"📍"``), which
+    :func:`UrbanAccessAnalyzer.plotting.general_map` draws on each POI
+    (``poi_column="type", poi_icon_column="icon"``).
+    """
+    parts = []
+    for s in specs:
+        gdf = pois[s["name"]]
+        if gdf.empty:
+            continue
+        name_cols = [c for c in gdf.columns if c == "name" or c.startswith("name:")]
+        names = gdf[name_cols].bfill(axis=1).iloc[:, 0] if name_cols else pd.Series("", index=gdf.index)
+        parts.append(
+            gpd.GeoDataFrame(
+                {"type": s["name"], "name": names.fillna("").astype(str).to_numpy(), "icon": s.get("icon", "📍")},
+                geometry=gdf.geometry.to_crs(4326).to_numpy(),
+                crs=4326,
+            )
+        )
+    if not parts:
+        return gpd.GeoDataFrame({"type": [], "name": [], "icon": []}, geometry=[], crs=4326)
+    return pd.concat(parts, ignore_index=True)

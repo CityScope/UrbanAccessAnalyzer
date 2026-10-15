@@ -19,11 +19,60 @@ from typing import Optional, List, Union
 from matplotlib import colormaps as mpl_colormaps
 import matplotlib.colors as mcolors
 import numpy as np
-import ipyleaflet
-from ipyleaflet import DrawControl, Map
 from shapely.geometry import shape
 
 from . import h3_ops
+from .basemap import add_basemap
+
+# Hover-card look for the colored layers (hexagons, streets): white rounded card.
+TOOLTIP_STYLE = (
+    "background-color: white; color: #222; border: none; border-radius: 10px; "
+    "box-shadow: 0 2px 12px rgba(0,0,0,0.25); padding: 8px 12px; "
+    "font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 13px;"
+)
+TOOLTIP_KWDS = {"style": TOOLTIP_STYLE, "sticky": True}
+
+
+def _format_value(v) -> str:
+    """Readable value: thousands separators for integers, one decimal for floats."""
+    import html as _html
+
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return ""
+    if isinstance(v, (int, np.integer)):
+        return f"{int(v):,}"
+    if isinstance(v, (float, np.floating)):
+        return f"{int(v):,}" if float(v).is_integer() else f"{v:,.1f}"
+    return _html.escape(str(v))
+
+
+def popup_js(labels: dict, decimals: int = 1, categories: Optional[dict] = None) -> str:
+    """JS function (for ``MapLayer.popup_js``) showing a small table with readable labels.
+
+    Args:
+        labels: ``{column: label}``, in display order, e.g.
+            ``{"population": "Population", "access_score": "Walkability (0-100)"}``.
+        decimals: Decimals for non-integer numbers.
+        categories: Optional ``{column: [label1, label2, ...]}`` to show a rounded
+            numeric value ``k`` as ``label_k`` (1-based), e.g. a mode rank as a name.
+    """
+    import json
+
+    return (
+        "function(p) {\n"
+        f"  var labels = {json.dumps(labels)};\n"
+        f"  var cats = {json.dumps(categories or {})};\n"
+        "  var html = '<table style=\"border-spacing:6px 2px\">';\n"
+        "  Object.keys(labels).forEach(function(k) {\n"
+        "    var v = p[k];\n"
+        "    if (v === undefined || v === null || v !== v) return;\n"
+        "    if (cats[k]) { v = cats[k][Math.min(Math.max(Math.round(v), 1), cats[k].length) - 1]; }\n"
+        f"    if (typeof v === 'number') v = Number.isInteger(v) ? v.toLocaleString() : v.toFixed({int(decimals)});\n"
+        "    html += '<tr><td style=\"font-weight:600\">' + labels[k] + '</td><td>' + v + '</td></tr>';\n"
+        "  });\n"
+        "  return html + '</table>';\n"
+        "}"
+    )
 
 
 def general_map(
@@ -51,6 +100,7 @@ def general_map(
     opacity: float = 0.4,
     size_column: Optional[str] = None,
     zoom_start: int = 11,
+    cluster_pois: bool = True,
 ) -> folium.Map:
 
     # ==========================================================
@@ -116,16 +166,16 @@ def general_map(
     centroid = pd.concat(all_geoms).union_all().centroid
 
     # ==========================================================
-    # MAP (TRUE B&W BASEMAP)
+    # MAP (MapLibre vector-tile basemap)
     # ==========================================================
     if m is None:
         m = folium.Map(
             location=[centroid.y, centroid.x],
             zoom_start=zoom_start,
-            tiles="https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png",
-            attr="CartoDB",
+            tiles=None,
             control_scale=True,
         )
+        add_basemap(m, "positron")
 
     # ------------------------------------------------------------------
     # Helpers
@@ -149,17 +199,36 @@ def general_map(
         return max_radius * clipped / p90 if p90 > 0 else max_radius
 
     def tooltip_html(row):
-        html = "<table style='width:260px'>"
+        """Card for a POI: emoji + name as the title, its type below, then the other values."""
+        import html as _html
+
+        icon = row.get(poi_icon_column) if poi_icon_column else None
+        name = row.get("name")
+        name = "" if name is None or (isinstance(name, float) and np.isnan(name)) else str(name).strip()
+        kind = row.get(poi_column) if poi_column else None
+        kind = "" if kind is None else str(kind)
+        skip = {"geometry", poi_icon_column, "name", poi_column}
+
+        title = _html.escape(name or kind or "Point of interest")
+        card = (
+            "<div style=\"font-family:system-ui,-apple-system,'Segoe UI',sans-serif;min-width:170px;\">"
+            f"<div style='font-size:15px;font-weight:600;line-height:1.3'>{icon + ' ' if icon else ''}{title}</div>"
+        )
+        if name and kind:
+            card += f"<div style='color:#777;font-size:12px;margin-bottom:4px'>{_html.escape(kind)}</div>"
+        rows = ""
         for k, v in row.items():
-            if k != "geometry":
-                html += f"""
-                <tr>
-                    <th style='text-align:left;padding-right:8px'>{k}</th>
-                    <td>{v}</td>
-                </tr>
-                """
-        html += "</table>"
-        return html
+            if k in skip:
+                continue
+            text = _format_value(v)
+            if text:
+                rows += (
+                    f"<tr><td style='color:#777;padding-right:10px'>{_html.escape(str(k))}</td>"
+                    f"<td style='font-weight:600'>{text}</td></tr>"
+                )
+        if rows:
+            card += f"<table style='font-size:13px;margin-top:2px'>{rows}</table>"
+        return card + "</div>"
 
     def increase_legend_size(m):
         legend_css = """
@@ -207,8 +276,6 @@ def general_map(
     if poi_cmap is None:
         poi_cmap = cmap 
 
-    if poi_color is None:
-        poi_color = color 
 
     if poi_vmin is None:
         poi_vmin = vmin 
@@ -252,8 +319,9 @@ def general_map(
                     vmin=vmin,
                     vmax=vmax,
                     legend=legend,
-                    legend_kwds={"position": "topright"},
-                    style_kwds={"color": None, "weight": 0, "fillOpacity": opacity},
+                    legend_kwds={"position": "topright", "caption": column},
+                    style_kwds={"color": "white", "weight": 0.6, "fillOpacity": opacity},
+                    tooltip_kwds=TOOLTIP_KWDS,
                 )
                 if legend:
                     m = increase_legend_size(m)
@@ -275,7 +343,9 @@ def general_map(
                     vmin=vmin,
                     vmax=vmax,
                     legend=legend,
-                    style_kwds={"weight": 2},
+                    legend_kwds={"caption": column},
+                    style_kwds={"weight": 2.5, "opacity": 0.9},
+                    tooltip_kwds=TOOLTIP_KWDS,
                 )
                 if legend:
                     m = increase_legend_size(m)
@@ -359,6 +429,16 @@ def general_map(
     # ==========================================================
     legend_map = {}
 
+    # Many pins would hide the map: group nearby POIs (they expand when zooming in).
+    from folium.plugins import MarkerCluster
+
+    poi_layer = m
+    if cluster_pois and len(pois):
+        poi_layer = MarkerCluster(
+            name="Points of interest",
+            options={"maxClusterRadius": 45, "showCoverageOnHover": False, "disableClusteringAtZoom": 16},
+        ).add_to(m)
+
     for p in pois:
 
         polys, lines, points = split_geoms(p)
@@ -366,6 +446,15 @@ def general_map(
         # ---------------------------
         # POLYGONS + CENTROID ICON
         # ---------------------------
+        if len(polys):
+            # All polygons at once (one layer), then one emoji marker per polygon.
+            folium.GeoJson(
+                polys[["geometry"]].to_json(),
+                style_function=lambda _f, c=poi_color or "#4c9f50": {
+                    "color": c, "fillColor": c, "fillOpacity": 0.3, "weight": 1.5,
+                },
+            ).add_to(m)
+
         for _, row in polys.iterrows():
 
             geom = row.geometry
@@ -374,17 +463,7 @@ def general_map(
             icon_value = row.get(poi_icon_column) if poi_icon_column else None
             label_value = row.get(poi_column, "POI")
 
-            fill = poi_color or "black"
-
-            gpd.GeoDataFrame([row], geometry=[geom], crs=4326).explore(
-                m=m,
-                color="black",
-                style_kwds={
-                    "fillColor": fill,
-                    "fillOpacity": 1.0,
-                    "weight": 2,
-                },
-            )
+            fill = poi_color or "#4c9f50"
 
             bg = "white" if icon_value else fill
 
@@ -394,7 +473,7 @@ def general_map(
                     position:absolute;
                     width:34px;height:34px;
                     background:{bg};
-                    border:2px solid black;
+                    border:2px solid #555;box-shadow:0 2px 6px rgba(0,0,0,.35);
                     border-radius:50% 50% 50% 0;
                     transform:rotate(-45deg);
                 "></div>
@@ -415,7 +494,7 @@ def general_map(
                 icon=folium.DivIcon(html=html, icon_size=(34, 34), icon_anchor=(17, 34)),
                 tooltip=tooltip_html(row),
                 popup=folium.Popup(tooltip_html(row), max_width=300),
-            ).add_to(m)
+            ).add_to(poi_layer)
 
             if icon_value:
                 legend_map[str(label_value)] = icon_value
@@ -447,7 +526,7 @@ def general_map(
                     position:absolute;
                     width:34px;height:34px;
                     background:{bg};
-                    border:2px solid black;
+                    border:2px solid #555;box-shadow:0 2px 6px rgba(0,0,0,.35);
                     border-radius:50% 50% 50% 0;
                     transform:rotate(-45deg);
                 "></div>
@@ -468,7 +547,7 @@ def general_map(
                 icon=folium.DivIcon(html=html, icon_size=(34, 34), icon_anchor=(17, 34)),
                 tooltip=tooltip_html(row),
                 popup=folium.Popup(tooltip_html(row), max_width=300),
-            ).add_to(m)
+            ).add_to(poi_layer)
 
             if icon_value:
                 legend_map[str(label_value)] = icon_value
@@ -506,6 +585,11 @@ def general_map(
             },
         ).add_to(m)
 
+    # Zoom to the study area (or to everything drawn if there is no AOI).
+    bounds_geoms = [aoi.geometry] if aoi is not None else all_geoms
+    minx, miny, maxx, maxy = pd.concat(bounds_geoms).total_bounds
+    m.fit_bounds([[miny, minx], [maxy, maxx]])
+
     return m
 
 
@@ -517,6 +601,9 @@ def ipyleaflet_drawable_map(m=None, center=[0, 0], zoom=11, height="800px"):
         - m: ipyleaflet map
         - get_drawn_geometries(): returns GeoDataFrame
     """
+    import ipyleaflet  # optional dependency: only the drawing helper needs it
+    from ipyleaflet import DrawControl, Map
+
 
     if m is None:
         m = Map(
