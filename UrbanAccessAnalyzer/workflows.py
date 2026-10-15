@@ -111,6 +111,7 @@ def finish(hexes, edges, aoi, folder, labels, score, map_file, bands=None, band_
         os.path.join(folder, "maps", map_file), hexes, aoi, labels, score, edges=edges, pois=pois,
         categories=categories, **map_kwargs,
     )
+    utils.offer_download(os.path.join(folder, "maps", map_file))
     if categorical_group:
         stats = h3_population.population_by_group(hexes, hexes[categorical_group])
     else:

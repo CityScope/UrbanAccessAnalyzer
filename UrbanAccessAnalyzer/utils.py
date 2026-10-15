@@ -346,3 +346,15 @@ def output_folder(place: str, base: str = "output") -> str:
     folder = os.path.join(base, sanitize_filename(place))
     os.makedirs(folder, exist_ok=True)
     return folder
+
+
+def offer_download(path: str) -> None:
+    """In Colab, download a saved map: inline outputs cannot draw the vector background, the file can."""
+    import sys
+
+    if "google.colab" not in sys.modules:
+        return
+    from google.colab import files
+
+    print(f"Colab shows maps without background: open the downloaded {os.path.basename(path)} in your browser.")
+    files.download(path)
