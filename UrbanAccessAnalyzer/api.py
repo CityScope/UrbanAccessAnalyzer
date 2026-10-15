@@ -130,8 +130,8 @@ class StreetNetwork:
             pbf_path: Path to a ``.osm.pbf`` file. If it doesn't exist and
                 ``aoi`` is given, it's downloaded from Geofabrik first
                 (:func:`UrbanAccessAnalyzer.osm_io.download_geofabrik`).
-            aoi: AOI used both for downloading (if needed) and for bbox
-                prefiltering during load.
+            aoi: Area of interest (a GeoDataFrame, or an :class:`AreaOfInterest`), used both for
+                downloading (if needed) and for bbox prefiltering during load.
             network_type: One of ``"walk"``, ``"bike"``, ``"drive"``,
                 ``"all"``, ``"walk+bike"``, ``"walk+bike+primary"``.
             simplify_distance: If given, run
@@ -160,6 +160,8 @@ class StreetNetwork:
         Returns:
             A new :class:`StreetNetwork`, projected to a local UTM CRS.
         """
+        if aoi is not None and not isinstance(aoi, AreaOfInterest):
+            aoi = AreaOfInterest(aoi)  # a plain GeoDataFrame is fine
         if not os.path.isfile(pbf_path):
             if aoi is None:
                 raise ValueError("aoi is required to download a PBF when pbf_path does not exist.")
@@ -346,6 +348,13 @@ class PointsOfInterest:
         if fn is None:
             raise ValueError(f"Unknown POI kind {kind!r}; see UrbanAccessAnalyzer.osm_io for available queries.")
         return cls(fn(bounds), crs="EPSG:4326")
+
+    @classmethod
+    def from_gdf(cls, gdf: gpd.GeoDataFrame) -> "PointsOfInterest":
+        """POIs from a GeoDataFrame of points (polygons are reduced to one point each)."""
+        geoms = gdf.geometry.centroid if (gdf.geom_type != "Point").any() else gdf.geometry
+        df = pl.DataFrame({"geometry": shapely.to_wkb(geoms.to_numpy())}).with_columns(pl.col("geometry").cast(pl.Binary))
+        return cls(df, crs=str(gdf.crs))
 
     def assign_score_by_values(self, column: str, value_priority: list, out_column: str = "poi_score") -> "PointsOfInterest":
         """Assign a ``[0, 1]`` score from a categorical column; see :func:`UrbanAccessAnalyzer.scoring.score_by_values`."""

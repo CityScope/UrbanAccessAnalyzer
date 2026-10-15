@@ -58,20 +58,24 @@ def _check_specs(specs: Sequence[dict]) -> None:
             raise ValueError(f"POI {s['name']!r}: geometry must be 'Point' or 'Polygon', got {s['geometry']!r}")
 
 
-def query_from_file(path: str, name_column: Optional[str] = None) -> Callable:
+def query_from_file(path: str = "", name_column: Optional[str] = None) -> Callable:
     """Build a POI ``query`` from your own vector file (points or polygons).
 
     Any format GeoPandas reads works: GeoPackage, GeoJSON, Shapefile, GeoParquet,
     FlatGeobuf, ... in any CRS. Only the features inside the download area are kept.
 
     Args:
-        path: Path to the file.
+        path: Path to the file. In Google Colab, leave it empty (or wrong) and the upload dialog
+            opens automatically to pick the file from your computer (see
+            :func:`UrbanAccessAnalyzer.utils.select_file`).
         name_column: Column with the POI names (shown on the maps), if any.
 
     Returns:
         A function ``query(bounds)`` to use as the ``"query"`` of a POI config.
     """
-    from . import geometry_ops
+    from . import geometry_ops, utils
+
+    path = utils.select_file(path)
 
     def _query(bounds: gpd.GeoDataFrame) -> pl.DataFrame:
         gdf = geometry_ops.read_geofile(path, bounds=bounds)
@@ -144,6 +148,7 @@ def grade(
     max_snap_dist: Optional[float] = 150.0,
     min_edge_length: float = 30.0,
     score_col: str = "access_score",
+    aoi: Optional[gpd.GeoDataFrame] = None,
 ) -> tuple[gpd.GeoDataFrame, StreetNetwork]:
     """Grade every street edge by its walk distance to each POI type, then combine.
 
@@ -155,6 +160,7 @@ def grade(
         max_snap_dist: Max distance (m) from a POI to the nearest street.
         min_edge_length: Minimum edge length (m) created when snapping POIs.
         score_col: Name of the combined ``0-100`` score column.
+        aoi: If given, only the edges inside this area are returned.
 
     Returns:
         ``(edges_gdf, snapped_network)``. ``edges_gdf`` has one row per street
@@ -222,6 +228,8 @@ def grade(
     )
     geom = shapely.from_wkb(edges["geometry_wkb"].to_numpy())
     edges_gdf = gpd.GeoDataFrame(edges.drop("geometry_wkb").to_pandas(), geometry=geom, crs=network.crs)
+    if aoi is not None:  # keep the study area only
+        edges_gdf = edges_gdf[edges_gdf.intersects(aoi.to_crs(network.crs).union_all())].reset_index(drop=True)
     return edges_gdf, network
 
 

@@ -49,10 +49,23 @@ class MapLibreBasemap(MacroElement):
             var map = {{ this._parent.get_name() }};
             // Leaflet needs a max zoom for fitBounds/zoom controls; a vector style does not provide one.
             if (map.options.maxZoom === undefined) { map.options.maxZoom = 20; }
-            L.maplibreGL({
-                style: {{ this.style|tojson }},
-                attribution: {{ this.attribution|tojson }},
-                pane: {{ this.pane|tojson }}
+            function hasWebGL() {
+                try { var c = document.createElement('canvas'); return !!(c.getContext('webgl2') || c.getContext('webgl')); }
+                catch (e) { return false; }
+            }
+            // MapLibre vector background; if it cannot start (blocked script, no WebGL), use plain OpenStreetMap tiles.
+            if (typeof L.maplibreGL === 'function' && typeof maplibregl !== 'undefined' && hasWebGL()) {
+                try {
+                    L.maplibreGL({
+                        style: {{ this.style|tojson }},
+                        attribution: {{ this.attribution|tojson }},
+                        pane: {{ this.pane|tojson }}
+                    }).addTo(map);
+                    return;
+                } catch (e) { console.warn('MapLibre background failed, using OpenStreetMap tiles', e); }
+            }
+            L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
             }).addTo(map);
         })();
         {% endmacro %}

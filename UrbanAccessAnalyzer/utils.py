@@ -258,3 +258,36 @@ def gdf_fuzzy_match(gdf, city_name, column="NAMEUNIT"):
     )
 
     return gdf.iloc[index : index + 1].drop(columns=["_match_norm"])
+
+
+def buffer_gdf(gdf: gpd.GeoDataFrame, meters: float) -> gpd.GeoDataFrame:
+    """One-polygon GeoDataFrame: ``gdf`` merged and grown by ``meters`` (same CRS as ``gdf``)."""
+    merged = gpd.GeoDataFrame(geometry=[gdf.union_all()], crs=gdf.crs)
+    if not meters:
+        return merged
+    utm = merged.estimate_utm_crs()
+    return gpd.GeoDataFrame(geometry=merged.to_crs(utm).buffer(meters), crs=utm).to_crs(gdf.crs)
+
+
+def select_file(path: str = "") -> str:
+    """Path of a file of the user's, picked automatically where possible.
+
+    - ``path`` given and it exists (local run, or a file already in Colab): used as is.
+    - Google Colab otherwise: the upload dialog opens to choose a file from your computer.
+    - Local run without a valid ``path``: raises, since there is nothing to pick from.
+
+    Returns:
+        The path of the file (uploaded files are saved in the working directory, ``/content``).
+    """
+    import sys
+
+    if path and os.path.exists(path):
+        return path
+    if "google.colab" in sys.modules:
+        from google.colab import files
+
+        uploaded = files.upload()  # opens the file picker
+        if not uploaded:
+            raise ValueError("No file was selected.")
+        return next(iter(uploaded))
+    raise FileNotFoundError(f"File not found: {path!r}. Set the path of your file.")

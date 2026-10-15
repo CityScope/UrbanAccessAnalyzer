@@ -101,6 +101,8 @@ def general_map(
     size_column: Optional[str] = None,
     zoom_start: int = 11,
     cluster_pois: bool = True,
+    categories: Optional[dict] = None,
+    legend_on: bool = True,
 ) -> folium.Map:
 
     # ==========================================================
@@ -305,7 +307,16 @@ def general_map(
     # ------------------------------------------------------------------
     # Draw gdfs
     # ------------------------------------------------------------------
-    legend = True
+    # Categorical column (text labels): ``categories`` is {label: color}; the legend lists the labels.
+    if categories:
+        cmap = list(categories.values())
+    scale = (
+        dict(categorical=True, categories=list(categories), cmap=cmap)
+        if categories
+        else dict(cmap=cmap, vmin=vmin, vmax=vmax)
+    )
+
+    legend = legend_on
     for g in gdfs:
         polys, lines, points = split_geoms(g)
 
@@ -315,9 +326,7 @@ def general_map(
                 m = polys.explore(
                     m=m,
                     column=column,
-                    cmap=cmap,
-                    vmin=vmin,
-                    vmax=vmax,
+                    **scale,
                     legend=legend,
                     legend_kwds={"position": "topright", "caption": column},
                     style_kwds={"color": "white", "weight": 0.6, "fillOpacity": opacity},
@@ -339,9 +348,7 @@ def general_map(
                 m = lines.explore(
                     m=m,
                     column=column,
-                    cmap=cmap,
-                    vmin=vmin,
-                    vmax=vmax,
+                    **scale,
                     legend=legend,
                     legend_kwds={"caption": column},
                     style_kwds={"weight": 2.5, "opacity": 0.9},
@@ -671,3 +678,261 @@ def ipyleaflet_drawable_map(m=None, center=[0, 0], zoom=11, height="800px"):
         )
 
     return m, get_drawn_geometries
+
+def save_poi_map(path: str, aoi: gpd.GeoDataFrame, pois: gpd.GeoDataFrame) -> folium.Map:
+    """Save a standalone HTML map (double-click to open) of POIs with their emoji icons.
+
+    Args:
+        path: Output ``.html`` file (folders are created).
+        aoi: Study area.
+        pois: Table with ``type``, ``name`` and ``icon`` columns, see
+            :func:`UrbanAccessAnalyzer.grading.poi_table`.
+    """
+    import os
+
+    m = general_map(aoi=aoi, pois=pois, poi_column="type", poi_icon_column="icon")
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    m.save(path)
+    return m
+
+
+def _street_layer(
+    m: folium.Map,
+    edges: gpd.GeoDataFrame,
+    score: str,
+    cmap: str,
+    vmin: float,
+    vmax: float,
+    categories: Optional[dict],
+    n_classes: int = 10,
+    tolerance_m: float = 3.0,
+) -> None:
+    """Street network as a light, non-interactive layer (no hover, no click).
+
+    Streets are grouped by color class (a handful of features instead of one per street),
+    duplicates are dropped and geometry is simplified, so the map file stays small.
+    """
+    import numpy as np
+
+    gdf = edges[[score, "geometry"]].copy()
+    if gdf.crs is None or gdf.crs.is_geographic:
+        tol, precision = tolerance_m / 111_000, 1e-5
+        gdf = gdf.to_crs(4326)
+    else:
+        tol, precision = tolerance_m, 0.5
+    gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+
+    if categories:
+        colors = gdf[score].map(categories).fillna("#999999")
+    else:
+        cm = mpl_colormaps[cmap]
+        frac = ((gdf[score].astype(float) - vmin) / (vmax - vmin)).clip(0, 1)
+        cls = np.minimum((frac * n_classes).fillna(0).astype(int), n_classes - 1)
+        palette = [mcolors.to_hex(cm((i + 0.5) / n_classes)) for i in range(n_classes)]
+        colors = cls.map(lambda i: palette[i])
+
+    features = []
+    for color, part in gdf.groupby(colors.to_numpy()):
+        geoms = shapely.get_parts(part.geometry.to_numpy())
+        geoms = shapely.get_parts(shapely.simplify(geoms, tol))  # simpler lines
+        geoms = geoms[~shapely.is_empty(geoms)]
+        norm = shapely.normalize(geoms)  # same line in both directions -> one
+        _, first = np.unique(shapely.to_wkb(norm), return_index=True)
+        geoms = shapely.set_precision(geoms[np.sort(first)], precision)
+        if gdf.crs.is_projected:  # back to lon/lat for the map
+            geoms = gpd.GeoSeries(geoms, crs=gdf.crs).to_crs(4326).to_numpy()
+            geoms = shapely.set_precision(geoms, 1e-5)
+        features.append({
+            "type": "Feature", "properties": {"c": color},
+            "geometry": shapely.geometry.mapping(shapely.multilinestrings(geoms)),
+        })
+
+    folium.map.CustomPane("streets", z_index=390, pointer_events=False).add_to(m)  # below the circles, ignores the mouse
+    folium.GeoJson(
+        {"type": "FeatureCollection", "features": features},
+        pane="streets",
+        style_function=lambda f: {"color": f["properties"]["c"], "weight": 1.2, "opacity": 0.55},
+    ).add_to(m)
+
+
+
+from branca.element import MacroElement as _MacroElement
+from jinja2 import Template as _Template
+
+
+class _Circles(_MacroElement):
+    """Population circles as one compact layer: a shared color palette and one tooltip card style."""
+
+    _template = _Template(
+        """
+        {% macro header(this, kwargs) %}
+        <style>
+          .uaa-tip { background:#fff; color:#222; border:none; border-radius:10px; padding:8px 12px;
+                     box-shadow:0 2px 12px rgba(0,0,0,.25); font:13px system-ui,-apple-system,'Segoe UI',sans-serif; }
+          .uaa-tip td { padding:1px 6px 1px 0; } .uaa-tip td:last-child { font-weight:600; }
+        </style>
+        {% endmacro %}
+        {% macro script(this, kwargs) %}
+        (function() {
+          var d = {{ this.data|tojson }}, map = {{ this._parent.get_name() }};
+          var group = L.layerGroup();
+          d.pts.forEach(function(p) {
+            var c = L.circleMarker([p[0], p[1]], {radius: p[2], fillColor: d.colors[p[3]], color: '#444',
+                                                  weight: 0.7, fillOpacity: 0.85});
+            var rows = '';
+            for (var i = 0; i < d.labels.length; i++) { rows += '<tr><td>' + d.labels[i] + '</td><td>' + p[4][i] + '</td></tr>'; }
+            c.bindTooltip('<table>' + rows + '</table>', {sticky: true, className: 'uaa-tip', opacity: 1});
+            group.addLayer(c);
+          });
+          group.addTo(map);
+        })();
+        {% endmacro %}
+        """
+    )
+
+    def __init__(self, data):
+        super().__init__()
+        self._name = "Circles"
+        self.data = data
+
+def _circle_layer(
+    m: folium.Map,
+    hexes: gpd.GeoDataFrame,
+    labels: dict,
+    score: str,
+    cmap: str,
+    vmin: float,
+    vmax: float,
+    categories: Optional[dict],
+    max_radius: float = 7.0,
+) -> None:
+    """One circle per hexagon center: size = population, color = score. Adds the legends too."""
+    import html as _html
+
+    import branca.colormap as bcm
+
+    pop_label = labels["population"]
+    hexes = hexes[hexes[pop_label] > 0].copy()
+    if hexes.empty:
+        return
+    utm = hexes.estimate_utm_crs()
+    hexes["geometry"] = hexes.to_crs(utm).centroid.to_crs(4326)
+
+    # Size: area proportional to population (radius ~ sqrt), capped at the 98th percentile.
+    pop = hexes[pop_label].astype(float)
+    ref = max(pop.quantile(0.98), 1.0)
+    radius = 2 + (max_radius - 2) * np.sqrt((pop / ref).clip(upper=1.0))
+
+    # Color: a small palette (categories, or 16 steps of the color map) instead of one color per circle.
+    values = hexes[labels[score]]
+    if categories:
+        palette = list(categories.values()) + ["#999999"]
+        index = values.map({k: i for i, k in enumerate(categories)}).fillna(len(categories)).astype(int)
+    else:
+        cm, n = mpl_colormaps[cmap], 16
+        palette = [mcolors.to_hex(cm((i + 0.5) / n)) for i in range(n)] + ["#999999"]
+        frac = ((values.astype(float) - vmin) / (vmax - vmin)).clip(0, 1)
+        index = np.minimum((frac * n).fillna(n).astype(int), n).where(values.notna(), n)
+
+    def fmt(v):
+        return _format_value(v)
+
+    cols = list(labels)
+    cols_in = [c for c in labels.values() if c in hexes.columns]
+    cen = hexes.geometry
+    pts = [
+        [round(g.y, 6), round(g.x, 6), round(float(r), 1), int(i), [fmt(row[c]) for c in cols_in]]
+        for g, r, i, (_, row) in zip(cen, radius, index, hexes[cols_in].iterrows())
+    ]
+    _Circles({"labels": cols_in, "colors": palette, "pts": pts}).add_to(m)
+
+    # Legends: color scale (or category list) and circle sizes.
+    if categories:
+        rows = "".join(
+            f"<div><span style='display:inline-block;width:12px;height:12px;border-radius:50%;"
+            f"background:{c};margin-right:6px'></span>{_html.escape(str(k))}</div>"
+            for k, c in categories.items()
+        )
+        m.get_root().html.add_child(folium.Element(
+            "<div style='position:fixed;top:12px;right:12px;z-index:9999;background:white;padding:8px 12px;"
+            "border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,.25);font:13px system-ui,sans-serif'>"
+            f"<b>{_html.escape(labels[score])}</b>{rows}</div>"
+        ))
+    else:
+        colors = [mcolors.to_hex(mpl_colormaps[cmap](i)) for i in np.linspace(0, 1, 12)]
+        bcm.LinearColormap(colors, vmin=vmin, vmax=vmax, caption=labels[score]).add_to(m)
+
+    samples = [pop.quantile(0.2), pop.quantile(0.6), ref]
+    sizes = [2 + (max_radius - 2) * np.sqrt(min(v / ref, 1.0)) for v in samples]
+    circles = "".join(
+        f"<div style='display:flex;align-items:center;gap:8px;margin-top:2px'>"
+        f"<span style='display:inline-block;width:{2 * r:.0f}px;height:{2 * r:.0f}px;border-radius:50%;"
+        f"background:#bbb;border:1px solid white;box-shadow:0 0 0 1px #999'></span>{v:,.0f}</div>"
+        for r, v in zip(sizes, samples)
+    )
+    m.get_root().html.add_child(folium.Element(
+        "<div style='position:fixed;bottom:28px;right:12px;z-index:9999;background:white;padding:8px 12px;"
+        "border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,.25);font:13px system-ui,sans-serif'>"
+        f"<b>{_html.escape(pop_label)}</b>{circles}</div>"
+    ))
+
+
+def save_access_map(
+    path: str,
+    hexes: gpd.GeoDataFrame,
+    aoi: gpd.GeoDataFrame,
+    labels: dict,
+    score: str,
+    edges: Optional[gpd.GeoDataFrame] = None,
+    pois: Optional[gpd.GeoDataFrame] = None,
+    cmap: str = "RdYlGn",
+    vmin: float = 0,
+    vmax: float = 100,
+    categories: Optional[dict] = None,
+    shape: str = "circles",
+) -> folium.Map:
+    """Save a standalone HTML map (double-click to open) of an access score and the population.
+
+    By default each H3 hexagon is a circle: its size shows the population and its color the score.
+
+    Args:
+        path: Output ``.html`` file (folders are created).
+        hexes: Hexagons, see :func:`UrbanAccessAnalyzer.h3_population.h3_with_population`.
+        aoi: Study area.
+        labels: ``{column: name shown on hover}`` in display order, e.g.
+            ``{"population": "👥 Population", "access_score": "🚶 Walkability (0-100)"}``.
+        score: Key of ``labels`` used to color the map.
+        edges: Optional street edges (with the ``score`` column), drawn as a light layer without
+            hover or click, so the file stays small.
+        pois: Optional POI table (``type``, ``name``, ``icon``) drawn as emoji pins.
+        cmap: Color map (default red-yellow-green).
+        vmin: Score value of the first color.
+        vmax: Score value of the last color.
+        shape: ``"circles"`` (default: size = population, color = score) or ``"hexagons"``.
+        categories: For a text ``score`` column: ``{label: color}``; the legend then lists the
+            labels (no numeric scale).
+    """
+    import os
+
+    def view(gdf):
+        cols = [c for c in labels if c in gdf.columns]
+        out = gdf.to_crs(4326)[[*cols, "geometry"]].rename(columns=labels).round(1)
+        if "population" in cols:
+            out[labels["population"]] = out[labels["population"]].fillna(0).round().astype(int)
+        return out
+
+    kwargs = dict(pois=pois, poi_column="type", poi_icon_column="icon") if pois is not None else {}
+    if shape == "hexagons":
+        m = general_map(
+            aoi=aoi, gdfs=[view(hexes)], column=labels[score], cmap=cmap, vmin=vmin, vmax=vmax,
+            categories=categories, **kwargs,
+        )
+    else:
+        m = general_map(aoi=aoi, **kwargs)
+    if edges is not None:
+        _street_layer(m, edges, score, cmap, vmin, vmax, categories)
+    if shape != "hexagons":
+        _circle_layer(m, view(hexes), labels, score, cmap, vmin, vmax, categories)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    m.save(path)
+    return m
