@@ -41,3 +41,13 @@ def test_load_pbf_oneway_produces_single_direction(sample_pbf_path):
     # for a oneway edge_uid there should be exactly one directed row
     counts = oneway_edges.group_by("edge_uid").agg(pl.len().alias("n"))
     assert (counts["n"] == 1).all()
+
+
+def test_load_pbf_walk_keeps_ways_without_foot_or_access_tags(sample_pbf_path):
+    # Regression: null `foot`/`access` tags used to propagate through the
+    # pedestrian-prohibited filter and drop every untagged walkable way.
+    _, edges_all = osm_io.load_pbf(sample_pbf_path, network_type="all")
+    _, edges_walk = osm_io.load_pbf(sample_pbf_path, network_type="walk")
+    walkable = edges_all.filter(edges_all["highway"].is_in(list(osm_io.WALK_HIGHWAYS)))
+    assert edges_walk.height > 0
+    assert edges_walk.height >= 0.9 * walkable.height

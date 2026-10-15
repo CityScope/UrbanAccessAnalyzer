@@ -464,10 +464,13 @@ def load_pbf(
     # above never checked for (it only ever ADDS ways by tag, never
     # excludes one already highway-eligible).
     if "foot" in profile["extra_tags"]:
-        foot_prohibited = pl.col("foot").is_in(["no", "private", "use_sidepath"])
-        access_prohibited = pl.col("access_tag").is_in(["no", "private"]) & ~pl.col("foot").is_in(
-            ["yes", "permissive", "designated"]
-        )
+        # `fill_null(False)`: `is_in` on an untagged (null) way yields null, and
+        # `keep_mask & ~null` is null -- which `filter` drops. Without this, every
+        # way lacking a `foot`/`access` tag (i.e. most streets) was discarded.
+        foot_prohibited = pl.col("foot").is_in(["no", "private", "use_sidepath"]).fill_null(False)
+        access_prohibited = pl.col("access_tag").is_in(["no", "private"]).fill_null(False) & ~pl.col(
+            "foot"
+        ).is_in(["yes", "permissive", "designated"]).fill_null(False)
         keep_mask = keep_mask & ~foot_prohibited & ~access_prohibited
     ways = ways.filter(keep_mask & pl.col("highway").is_not_null())
 
@@ -564,7 +567,13 @@ def load_pbf(
     return nodes, edges
 
 
-def overpass_query(query: str, bounds: gpd.GeoDataFrame | gpd.GeoSeries, timeout: int = 120) -> pl.DataFrame:
+def overpass_query(
+    query: str,
+    bounds: gpd.GeoDataFrame | gpd.GeoSeries,
+    timeout: int = 120,
+    retries: int = 5,
+    retry_wait: float = 10.0,
+) -> pl.DataFrame:
     """Run a raw Overpass API query and return results as a Polars DataFrame.
 
     Args:
@@ -573,6 +582,9 @@ def overpass_query(query: str, bounds: gpd.GeoDataFrame | gpd.GeoSeries, timeout
         bounds: Geometry defining the query bounding box; the result is also
             spatially filtered to intersect this geometry.
         timeout: HTTP timeout in seconds per Overpass mirror attempt.
+        retries: Rounds over all mirrors before giving up (public Overpass
+            servers are often busy).
+        retry_wait: Base wait in seconds; round ``k`` waits ``k * retry_wait``.
 
     Returns:
         A Polars DataFrame with a WKB ``geometry`` column (EPSG:4326) plus one
@@ -592,25 +604,32 @@ def overpass_query(query: str, bounds: gpd.GeoDataFrame | gpd.GeoSeries, timeout
     ]
 
     response_json = None
-    for i, url in enumerate(overpass_urls, start=1):
-        try:
-            response = requests.get(
-                url, params={"data": query}, timeout=timeout,
-                headers={"User-Agent": "Python Overpass Client"},
-            )
-            if response.status_code != 200:
-                print(f"Warning: server {i}/{len(overpass_urls)} failed ({url}) HTTP {response.status_code}")
+    for round_ in range(retries):
+        if round_:
+            wait = retry_wait * round_  # back off: 10s, 20s, 30s...
+            print(f"Retrying Overpass in {wait:.0f}s ({round_ + 1}/{retries})...")
+            time.sleep(wait)
+        for i, url in enumerate(overpass_urls, start=1):
+            try:
+                response = requests.get(
+                    url, params={"data": query}, timeout=timeout,
+                    headers={"User-Agent": "Python Overpass Client"},
+                )
+                if response.status_code != 200:
+                    print(f"Warning: server {i}/{len(overpass_urls)} failed ({url}) HTTP {response.status_code}")
+                    continue
+                response_json = response.json()
+                if "elements" not in response_json:
+                    print(f"Warning: server {i}/{len(overpass_urls)} missing 'elements'")
+                    response_json = None
+                    continue
+                break
+            except Exception as e:
+                print(f"Warning: server {i}/{len(overpass_urls)} request error ({e})")
+                time.sleep(1)
                 continue
-            response_json = response.json()
-            if "elements" not in response_json:
-                print(f"Warning: server {i}/{len(overpass_urls)} missing 'elements'")
-                response_json = None
-                continue
+        if response_json is not None:
             break
-        except Exception as e:
-            print(f"Warning: server {i}/{len(overpass_urls)} request error ({e})")
-            time.sleep(1)
-            continue
 
     if response_json is None:
         raise RuntimeError("All Overpass servers failed.")
@@ -807,3 +826,26 @@ def cinemas(bounds) -> pl.DataFrame:
         'relation["amenity"="cinema"]({{bbox}}););(._;>;);out body;',
         bounds,
     )
+
+
+def tag_query(key: str, value: str):
+    """Build a POI query function for any OSM tag, e.g. ``tag_query("amenity", "dentist")``.
+
+    The returned function has the same signature as the named queries above
+    (:func:`schools`, :func:`groceries`, ...): ``query(bounds) -> pl.DataFrame``.
+    It searches nodes, ways and relations tagged ``key=value`` inside
+    ``bounds``. Use ``value="*"`` to match any value of ``key``.
+    Tag reference: https://wiki.openstreetmap.org/wiki/Map_features
+    """
+    flt = f'["{key}"]' if value == "*" else f'["{key}"="{value}"]'
+    query = (
+        "[out:json][timeout:25];("
+        f"node{flt}({{{{bbox}}}});way{flt}({{{{bbox}}}});relation{flt}({{{{bbox}}}});"
+        ");(._;>;);out body;"
+    )
+
+    def _query(bounds) -> pl.DataFrame:
+        return overpass_query(query, bounds)
+
+    _query.__name__ = f"{key}_{value}".replace("*", "any")
+    return _query
