@@ -1,0 +1,51 @@
+site_name: UrbanAccessAnalyzer
+site_description: Street networks and access to points of interest
+docs_dir: docs
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: false
+            members_order: source
+            filters: ["!^_"]
+            merge_init_into_class: true
+            show_if_no_docstring: false
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.highlight
+nav:
+  - Home: index.md
+  - API reference:
+      - Overview: api/index.md
+      - api: api/api.md
+      - basemap: api/basemap.md
+      - csr_network: api/csr_network.md
+      - geometry_levels: api/geometry_levels.md
+      - geometry_ops: api/geometry_ops.md
+      - grading: api/grading.md
+      - graph_ops: api/graph_ops.md
+      - h3_ops: api/h3_ops.md
+      - isochrones: api/isochrones.md
+      - osm_io: api/osm_io.md
+      - plotting: api/plotting.md
+      - population: api/population.md
+      - raster_ops: api/raster_ops.md
+      - routing: api/routing.md
+      - scoring: api/scoring.md
+      - utils: api/utils.md

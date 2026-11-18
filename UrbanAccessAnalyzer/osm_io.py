@@ -160,7 +160,7 @@ def download_geofabrik(
     Args:
         aoi: AOI geometry, in any CRS.
         output_folder: Folder to save the downloaded ``.osm.pbf`` into. If
-            ``None``, saves to the current working directory.
+            ``None``, saves to ``$URBANACCESSANALYZER_CACHE_DIR/osm`` or, failing that, ``<tempdir>/urbanaccessanalyzer-cache/osm`` (never the CWD).
         coverage_tolerance: Maximum fraction of ``aoi``'s own area allowed
             to fall OUTSIDE a candidate region before it's rejected
             (``aoi.difference(region).area / aoi.area <= coverage_tolerance``),
@@ -227,6 +227,11 @@ def download_geofabrik(
 
     safe_name = utils.sanitize_filename(best_region.get("name", "region"))
     filename = f"{safe_name}.osm.pbf"
+    if output_folder is None:
+        import tempfile
+
+        env = os.environ.get("URBANACCESSANALYZER_CACHE_DIR")
+        output_folder = os.path.join(env or os.path.join(tempfile.gettempdir(), "urbanaccessanalyzer-cache"), "osm")
     if output_folder is not None:
         os.makedirs(output_folder, exist_ok=True)
         output_file = os.path.join(output_folder, filename)
@@ -734,14 +739,28 @@ def _simple_poi_query(query: str, bounds) -> pl.DataFrame:
 
 
 def bus_stops(bounds) -> pl.DataFrame:
-    """Fetch bus stop points from OSM (``highway=bus_stop``)."""
+    """Fetch bus stop points from OSM (``highway=bus_stop``).
+
+    Args:
+        bounds: Area to search: a polygon / GeoDataFrame or ``(min lon, min lat, max lon, max lat)``.
+
+    Returns:
+        One row per POI (WKB geometry in EPSG:4326 and its OSM tags).
+    """
     return _simple_poi_query(
         '[out:json][timeout:25];(node["highway"="bus_stop"]({{bbox}}););out body;>;out skel qt;', bounds
     )
 
 
 def schools(bounds) -> pl.DataFrame:
-    """Fetch school points/polygons from OSM (``amenity=school``)."""
+    """Fetch school points/polygons from OSM (``amenity=school``).
+
+    Args:
+        bounds: Area to search: a polygon / GeoDataFrame or ``(min lon, min lat, max lon, max lat)``.
+
+    Returns:
+        One row per POI (WKB geometry in EPSG:4326 and its OSM tags).
+    """
     return _simple_poi_query(
         '[out:xml][timeout:25];(node["amenity"="school"]({{bbox}});way["amenity"="school"]({{bbox}});'
         'relation["amenity"="school"]({{bbox}}););(._;>;);out body;',
@@ -750,7 +769,14 @@ def schools(bounds) -> pl.DataFrame:
 
 
 def healthcare(bounds) -> pl.DataFrame:
-    """Fetch healthcare facilities from OSM (hospitals, clinics, doctors, ``healthcare=*``)."""
+    """Fetch healthcare facilities from OSM (hospitals, clinics, doctors, ``healthcare=*``).
+
+    Args:
+        bounds: Area to search: a polygon / GeoDataFrame or ``(min lon, min lat, max lon, max lat)``.
+
+    Returns:
+        One row per POI (WKB geometry in EPSG:4326 and its OSM tags).
+    """
     return _simple_poi_query(
         '[out:xml][timeout:25];(node["amenity"~"hospital|clinic|doctors|healthcare"]({{bbox}});'
         'way["amenity"~"hospital|clinic|doctors|healthcare"]({{bbox}});'
@@ -762,7 +788,14 @@ def healthcare(bounds) -> pl.DataFrame:
 
 
 def groceries(bounds) -> pl.DataFrame:
-    """Fetch grocery/supermarket/market POIs from OSM."""
+    """Fetch grocery/supermarket/market POIs from OSM.
+
+    Args:
+        bounds: Area to search: a polygon / GeoDataFrame or ``(min lon, min lat, max lon, max lat)``.
+
+    Returns:
+        One row per POI (WKB geometry in EPSG:4326 and its OSM tags).
+    """
     return _simple_poi_query(
         '[out:xml][timeout:25];(node["shop"~"supermarket|grocery|convenience"]({{bbox}});'
         'way["shop"~"supermarket|grocery|convenience"]({{bbox}});'
@@ -774,7 +807,14 @@ def groceries(bounds) -> pl.DataFrame:
 
 
 def shops(bounds) -> pl.DataFrame:
-    """Fetch all ``shop=*`` POIs from OSM."""
+    """Fetch all ``shop=*`` POIs from OSM.
+
+    Args:
+        bounds: Area to search: a polygon / GeoDataFrame or ``(min lon, min lat, max lon, max lat)``.
+
+    Returns:
+        One row per POI (WKB geometry in EPSG:4326 and its OSM tags).
+    """
     return _simple_poi_query(
         '[out:xml][timeout:25];(node["shop"]({{bbox}});way["shop"]({{bbox}});'
         'relation["shop"]({{bbox}}););(._;>;);out body;',
@@ -783,7 +823,14 @@ def shops(bounds) -> pl.DataFrame:
 
 
 def restaurants(bounds) -> pl.DataFrame:
-    """Fetch restaurant/bar/pub/cafe/fast-food POIs from OSM."""
+    """Fetch restaurant/bar/pub/cafe/fast-food POIs from OSM.
+
+    Args:
+        bounds: Area to search: a polygon / GeoDataFrame or ``(min lon, min lat, max lon, max lat)``.
+
+    Returns:
+        One row per POI (WKB geometry in EPSG:4326 and its OSM tags).
+    """
     return _simple_poi_query(
         '[out:xml][timeout:25];(node["amenity"~"restaurant|bar|pub|cafe|fast_food"]({{bbox}});'
         'way["amenity"~"restaurant|bar|pub|cafe|fast_food"]({{bbox}});'
@@ -793,7 +840,14 @@ def restaurants(bounds) -> pl.DataFrame:
 
 
 def libraries(bounds) -> pl.DataFrame:
-    """Fetch library POIs from OSM (``amenity=library``)."""
+    """Fetch library POIs from OSM (``amenity=library``).
+
+    Args:
+        bounds: Area to search: a polygon / GeoDataFrame or ``(min lon, min lat, max lon, max lat)``.
+
+    Returns:
+        One row per POI (WKB geometry in EPSG:4326 and its OSM tags).
+    """
     return _simple_poi_query(
         '[out:xml][timeout:25];(node["amenity"="library"]({{bbox}});way["amenity"="library"]({{bbox}});'
         'relation["amenity"="library"]({{bbox}}););(._;>;);out body;',
@@ -802,7 +856,14 @@ def libraries(bounds) -> pl.DataFrame:
 
 
 def pharmacies(bounds) -> pl.DataFrame:
-    """Fetch pharmacy POIs from OSM (``amenity=pharmacy``)."""
+    """Fetch pharmacy POIs from OSM (``amenity=pharmacy``).
+
+    Args:
+        bounds: Area to search: a polygon / GeoDataFrame or ``(min lon, min lat, max lon, max lat)``.
+
+    Returns:
+        One row per POI (WKB geometry in EPSG:4326 and its OSM tags).
+    """
     return _simple_poi_query(
         '[out:xml][timeout:25];(node["amenity"="pharmacy"]({{bbox}});way["amenity"="pharmacy"]({{bbox}});'
         'relation["amenity"="pharmacy"]({{bbox}}););(._;>;);out body;',
@@ -811,7 +872,14 @@ def pharmacies(bounds) -> pl.DataFrame:
 
 
 def gyms(bounds) -> pl.DataFrame:
-    """Fetch gym POIs from OSM (``amenity=gym``)."""
+    """Fetch gym POIs from OSM (``amenity=gym``).
+
+    Args:
+        bounds: Area to search: a polygon / GeoDataFrame or ``(min lon, min lat, max lon, max lat)``.
+
+    Returns:
+        One row per POI (WKB geometry in EPSG:4326 and its OSM tags).
+    """
     return _simple_poi_query(
         '[out:xml][timeout:25];(node["amenity"="gym"]({{bbox}});way["amenity"="gym"]({{bbox}});'
         'relation["amenity"="gym"]({{bbox}}););(._;>;);out body;',
@@ -820,7 +888,14 @@ def gyms(bounds) -> pl.DataFrame:
 
 
 def cinemas(bounds) -> pl.DataFrame:
-    """Fetch cinema POIs from OSM (``amenity=cinema``)."""
+    """Fetch cinema POIs from OSM (``amenity=cinema``).
+
+    Args:
+        bounds: Area to search: a polygon / GeoDataFrame or ``(min lon, min lat, max lon, max lat)``.
+
+    Returns:
+        One row per POI (WKB geometry in EPSG:4326 and its OSM tags).
+    """
     return _simple_poi_query(
         '[out:xml][timeout:25];(node["amenity"="cinema"]({{bbox}});way["amenity"="cinema"]({{bbox}});'
         'relation["amenity"="cinema"]({{bbox}}););(._;>;);out body;',
@@ -836,6 +911,13 @@ def tag_query(key: str, value: str):
     It searches nodes, ways and relations tagged ``key=value`` inside
     ``bounds``. Use ``value="*"`` to match any value of ``key``.
     Tag reference: https://wiki.openstreetmap.org/wiki/Map_features
+
+    Args:
+        key: OSM tag key, e.g. ``"amenity"``.
+        value: Tag value, or ``"*"`` for any value.
+
+    Returns:
+        A function ``query(bounds) -> pl.DataFrame``.
     """
     flt = f'["{key}"]' if value == "*" else f'["{key}"="{value}"]'
     query = (

@@ -71,3 +71,12 @@ pytest
 
 Test fixtures use a small bundled `.osm.pbf` sample (`tests/fixtures/`); no
 network access or API keys are required to run the test suite.
+
+## Large files
+
+A pre-commit hook (`tools/check_large_files.py`, installed with `python3 tools/check_large_files.py --install`) refuses a commit with a file over 10 MB once: run the same commit again to keep it. Files over 50 MB are never committed.
+
+## Local files
+
+This repository is public. API keys (`api_keys.json`, `.env`), notes about a particular machine or its processes (hosting, uploads,
+local paths) and upload scripts are never committed: keep notes as `*.local.md` or under `local/`, which `.gitignore` excludes.

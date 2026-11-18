@@ -9,6 +9,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 
 dependencies = [
+    "geohierarchy @ git+https://github.com/CityScope/geohierarchy.git",
+    "pycensus @ git+https://github.com/CityScope/pyCensus.git",
     "duckdb>=1.1.0",
     "geopandas>=1.0.0",
     "geopy>=2.4.1",
@@ -30,10 +32,21 @@ dependencies = [
 
 # ---- Optional Dependencies (extras) ----
 [project.optional-dependencies]
+# GPU is OPTIONAL: nothing here is installed by default and every code path falls back to the CPU when CuPy / a CUDA device is missing (TRANSITLOS_DEVICE=cpu forces it).
+gpu = ["cupy-cuda12x>=13.0"]
+# RAPIDS (cuDF / cuGraph) is big and pins its own dependency versions: install it in a SEPARATE environment, e.g.
+#   python -m venv .venv-rapids && .venv-rapids/bin/pip install cudf-cu12 cugraph-cu12 --extra-index-url=https://pypi.nvidia.com
+# and point TRANSITLOS_RAPIDS_PYTHON at that environment's python; the pipeline calls it in a subprocess only when it exists.
+rapids = ["cudf-cu12", "cugraph-cu12"]
 
 # WorldPop raster download / country resolution (moved to pycensus)
 census = [
     "pycensus",
+]
+
+# Compiled-search helpers (csr_network.edge_cell_records): vectorised H3 indexing
+flex = [
+    "h3ronpy>=0.21.0",
 ]
 
 # Aggregating street edges onto any polygon layer (H3 or otherwise)
@@ -63,10 +76,6 @@ docs = [
     "myst-parser>=3.0.1",
     "furo>=2024.8.0",
 ]
-
-[tool.uv.sources]
-pycensus = { path = "../pyCensus", editable = true }
-geohierarchy = { path = "../geohierarchy", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

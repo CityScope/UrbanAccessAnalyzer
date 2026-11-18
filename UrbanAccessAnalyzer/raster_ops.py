@@ -56,6 +56,17 @@ WGS84_CRS = CRS.from_epsg(4326)
 
 
 def validate_crs(src:rio.io.DatasetReader|rio.io.DatasetWriter|dict|CRS|str|int):
+    """The CRS of a raster source, dict, CRS, string or EPSG code, as a rasterio ``CRS``.
+
+    Args:
+        src: An open rasterio dataset, a profile dict, a ``CRS``, a CRS string or an EPSG integer.
+
+    Returns:
+        The rasterio ``CRS``.
+
+    Raises:
+        ValueError: If no CRS can be read.
+    """
     import re
     if type(src) is dict:
         crs = src['crs']
@@ -112,21 +123,14 @@ def extract_affine_params(transform: Union[Affine, np.ndarray]) -> Tuple[float, 
     x = a * col + b * row + c
     y = d * col + e * row + f
 
-    Parameters
-    ----------
-    transform : rasterio.Affine or np.ndarray
-        The input affine transformation.
+    Args:
+        transform (rasterio.Affine or np.ndarray): The input affine transformation.
 
-    Returns
-    -------
-    tuple
-        A tuple of six float values: (a, b, c, d, e, f).
-        
-    Raises
-    ------
-    ValueError
-        If the transform format is not a rasterio.Affine or a 3x3 NumPy array.
-    """
+    Returns:
+        tuple: A tuple of six float values: (a, b, c, d, e, f).
+
+    Raises:
+        ValueError: If the transform format is not a rasterio.Affine or a 3x3 NumPy array."""
     if isinstance(transform, Affine):
         return transform.a, transform.b, transform.c, transform.d, transform.e, transform.f
     elif isinstance(transform, np.ndarray) and transform.shape == (3, 3):
@@ -152,6 +156,20 @@ def reproject(
     """
     Reprojects a raster to its local UTM zone while preserving the pixel grid.
     Returns float64 array with dst_nodata.
+
+    Args:
+        data: Raster values (2-D).
+        transform: Affine transform of ``data``.
+        crs: CRS of ``data``.
+        src_nodata: Nodata value of ``data``.
+        dst_nodata: Nodata value of the output.
+        dst_transform: Output transform; ``None`` computes an aligned one.
+        dst_crs: Output CRS; ``"utm"`` (default) = the local UTM zone.
+        width: Output width in pixels.
+        height: Output height in pixels.
+
+    Returns:
+        ``(array, transform, crs)`` of the reprojected raster (float64).
     """
     # Determine target UTM CRS using raster center
     left, bottom, right, top = array_bounds(data.shape[0], data.shape[1], transform)
@@ -207,32 +225,19 @@ def reproject_global(
     Reprojects a raster to a fixed global Web Mercator grid, ensuring perfect alignment
     with other rasters reprojected this way.
 
-    Parameters
-    ----------
-    data : np.ndarray
-        Source raster array.
-    transform : Affine
-        Source affine transform.
-    crs : CRS
-        Source CRS.
-    src_nodata : int|float, optional
-        Source nodata value.
-    dst_nodata : float, optional
-        Destination nodata value.
-    dst_crs : CRS/int/str
-        Target CRS (default EPSG:3857).
-    resolution : float
-        Pixel size in target CRS units (default 1000 meters).
+    Args:
+        data (np.ndarray): Source raster array.
+        transform (Affine): Source affine transform.
+        crs (CRS): Source CRS.
+        src_nodata (int|float, optional): Source nodata value.
+        dst_nodata (float, optional): Destination nodata value.
+        dst_crs (CRS/int/str): Target CRS (default EPSG:3857).
+        resolution (float): Pixel size in target CRS units (default 1000 meters).
 
-    Returns
-    -------
-    dst_array : np.ndarray
-        Reprojected raster array.
-    dst_transform : Affine
-        Destination affine transform.
-    dst_crs : CRS
-        Destination CRS.
-    """
+    Returns:
+        np.ndarray: Reprojected raster array.
+        Affine: Destination affine transform.
+        CRS: Destination CRS."""
     dst_crs = CRS.from_user_input(dst_crs)
 
     # Compute bounds of source raster in destination CRS
@@ -279,6 +284,20 @@ def raster_crop(
     nodata: float | None = np.nan,
     projected: bool = False
 ) -> Tuple[np.ndarray, Affine, CRS, int, int]:
+    """Read a raster (path or open dataset), crop it to an area and optionally reproject it to UTM.
+
+    Args:
+        src_input: Raster path or open rasterio dataset.
+        aoi: Area to crop to; ``None`` = whole raster.
+        nodata: Value written for nodata pixels.
+        projected: Reproject to the local UTM zone.
+
+    Returns:
+        ``(data, transform, crs, height, width)``.
+
+    Raises:
+        FileNotFoundError: If the path does not exist.
+    """
     _src = None
 
     if nodata is None:
@@ -359,21 +378,15 @@ def read_raster(path: Union[str, Path], aoi: Optional[Union[gpd.GeoDataFrame, gp
     reprojects it to UTM if its native CRS is geographic.
     The output raster data will always be of float64 dtype with np.nan representing nodata.
 
-    Parameters
-    ----------
-    path : Union[str, Path]
-        Path to the GeoTIFF raster file.
-    aoi : Optional[Union[gpd.GeoDataFrame, gpd.GeoSeries]], optional
-        Area of Interest to crop the raster. If None, the entire raster is processed.
+    Args:
+        path (Union[str, Path]): Path to the GeoTIFF raster file.
+        aoi (Optional[Union[gpd.GeoDataFrame, gpd.GeoSeries]], optional): Area of Interest to crop the raster. If None, the entire raster is processed.
 
-    Returns
-    -------
-    Tuple[np.ndarray, Affine, CRS]
-        A tuple containing:
-        - data (np.ndarray): The raster data (cropped, reprojected, float64, nan for nodata).
-        - transform (Affine): The affine transform of the output raster.
-        - crs (CRS): The CRS of the output raster (UTM if source was geographic).
-    """
+    Returns:
+        Tuple[np.ndarray, Affine, CRS]: A tuple containing:
+            - data (np.ndarray): The raster data (cropped, reprojected, float64, nan for nodata).
+            - transform (Affine): The affine transform of the output raster.
+            - crs (CRS): The CRS of the output raster (UTM if source was geographic)."""
     # raster_crop now handles reprojection, cropping, and consistent nodata/dtype output
     data, transform, crs, _, _ = raster_crop(path, aoi, nodata=nodata, projected=projected)
     
@@ -397,29 +410,19 @@ def vectorize(
     - int arrays: nodata can be np.nan (array cast to float internally)
     - str arrays: nodata defaults to np.nan, BUT '' is always treated as nodata regardless
 
-    Parameters
-    ----------
-    raster_array : np.ndarray
-        The input raster data array. Can be float, int, or str.
-    transform : Affine
-        The affine transform of the raster_array.
-    crs : CRS
-        The CRS of the raster_array.
-    aoi : Optional[gpd.GeoDataFrame | gpd.GeoSeries], optional
-        Area of interest. If provided, only pixels intersecting the AOI are included.
-    keep_nodata : bool, default=False
-        If True, nodata pixels (NaN, explicit nodata, or '') are included with value=None.
-    nodata : float | int | str, optional
-        Explicit nodata value (overrides defaults, except '' is *always* nodata for str).
+    Args:
+        raster_array (np.ndarray): The input raster data array. Can be float, int, or str.
+        transform (Affine): The affine transform of the raster_array.
+        crs (CRS): The CRS of the raster_array.
+        aoi (Optional[gpd.GeoDataFrame | gpd.GeoSeries], optional): Area of interest. If provided, only pixels intersecting the AOI are included.
+        keep_nodata (bool, default=False): If True, nodata pixels (NaN, explicit nodata, or '') are included with value=None.
+        nodata (float | int | str, optional): Explicit nodata value (overrides defaults, except '' is *always* nodata for str).
 
-    Returns
-    -------
-    gpd.GeoDataFrame
-        GeoDataFrame with columns:
-        - 'id': unique pixel identifier
-        - 'geometry': pixel polygon in EPSG:4326
-        - 'value': raster value or None
-    """
+    Returns:
+        gpd.GeoDataFrame: GeoDataFrame with columns:
+            - 'id': unique pixel identifier
+            - 'geometry': pixel polygon in EPSG:4326
+            - 'value': raster value or None"""
     dtype_kind = raster_array.dtype.kind
 
     # Normalize int arrays → float so np.nan works
@@ -607,6 +610,19 @@ def rasterize(
     Rasterize a GeoDataFrame into a numpy array using a given raster transform and shape.
     Supports int, float, or str rasters. Automatically handles value_order priority and
     string categorical rasters.
+
+    Args:
+        gdf: Geometries to burn.
+        transform: Affine transform of the output grid.
+        shape: ``(height, width)`` of the output, or an array of that shape.
+        crs: CRS of the output grid (the geometries are reprojected to it).
+        value_column: Column burnt into the pixels; ``None`` = 1 where any geometry is.
+        value_order: Values from highest to lowest priority where geometries overlap.
+        background_value: Value of pixels with no geometry.
+        all_touched: Burn every pixel a geometry touches (not only those whose centre it covers).
+
+    Returns:
+        The raster array.
     """
     # Handle shape if numpy array passed
     if isinstance(shape, np.ndarray):
@@ -722,22 +738,15 @@ def buffer_mean(
     Density is calculated as `value / area`. If a buffer is specified,
     a moving window average is applied using a circular kernel.
 
-    Parameters
-    ----------
-    raster : np.ndarray
-        The input raster data array (e.g., population counts). Expected to be in a metric CRS.
-    transform : Affine
-        The affine transform of the raster.
-    buffer : float, optional
-        Radius of the buffer in meters for density calculation.
-        If 0, density is calculated per pixel. If > 0, a moving average
-        is computed over a circular window of this radius. Defaults to 0.
+    Args:
+        raster (np.ndarray): The input raster data array (e.g., population counts). Expected to be in a metric CRS.
+        transform (Affine): The affine transform of the raster.
+        buffer (float, optional): Radius of the buffer in meters for density calculation.
+            If 0, density is calculated per pixel. If > 0, a moving average
+            is computed over a circular window of this radius. Defaults to 0.
 
-    Returns
-    -------
-    np.ndarray
-        A numpy array representing the density raster (e.g., population density per km²).
-    """
+    Returns:
+        np.ndarray: A numpy array representing the density raster (e.g., population density per km²)."""
     a, b, c, d, e, f = extract_affine_params(transform)
     # Pixel width is 'a', pixel height is 'e' (typically negative).
     # Area of one pixel is |a * e|. Convert to km².
@@ -792,6 +801,16 @@ def buffer_mean(
 
 def merge(input_paths, bounds: gpd.GeoSeries = None, method='max'):
     # Open all input GeoTIFF files
+    """Mosaic several rasters into one, optionally limited to ``bounds``.
+
+    Args:
+        input_paths: Raster paths or open rasterio datasets.
+        bounds: Optional area; the mosaic covers its bounding box.
+        method: How overlapping pixels combine (``"max"``, ``"min"``, ``"first"``, ``"last"``, ``"sum"``).
+
+    Returns:
+        ``(mosaic array (bands, rows, cols), transform, crs)``.
+    """
     if isinstance(input_paths[0], str):
         src = [rio.open(path) for path in input_paths]
     else:

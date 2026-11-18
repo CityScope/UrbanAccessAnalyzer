@@ -63,6 +63,15 @@ except ImportError:
 
 def ls_str_to_int(arr,ref_list):
     # Create a mapping dict from value -> index
+    """Encode level-of-service labels as their index in ``ref_list`` (labels not in the list get ``len(ref_list)``).
+
+    Args:
+        arr: Array of labels.
+        ref_list: The labels from best to worst.
+
+    Returns:
+        Integer array of the same shape.
+    """
     mapping = {v: i for i, v in enumerate(ref_list)}
 
     # Vectorized mapping using np.vectorize
@@ -73,6 +82,15 @@ def ls_str_to_int(arr,ref_list):
 
 def ls_int_to_str(arr,ref_list):
     # Make lookup table with extra '' for out-of-list values
+    """Decode indices back to level-of-service labels (``len(ref_list)`` becomes ``""``).
+
+    Args:
+        arr: Integer array from :func:`ls_str_to_int`.
+        ref_list: The labels from best to worst.
+
+    Returns:
+        Array of labels.
+    """
     lut = np.array(ref_list + [""])
 
     # Map values back
@@ -80,11 +98,37 @@ def ls_int_to_str(arr,ref_list):
     return decoded
 
 def level_of_service_difference(offer,demand,level_of_services):
+    """How many levels the demand is above the offer (positive: the place needs more service than it has).
+
+    Args:
+        offer: Level-of-service labels offered.
+        demand: Level-of-service labels the population density calls for.
+        level_of_services: The labels from best to worst.
+
+    Returns:
+        Integer array: demand index minus offer index.
+    """
     difference = ls_str_to_int(demand,level_of_services) - ls_str_to_int(offer,level_of_services)
     return difference
 
 
 def filter_population_by_streets(streets_gdf,population,street_buffer,aoi=None,transform=None,crs=None,min_population:float=0,scale:bool=True,population_column='population'):
+    """Keep only the population that lives within ``street_buffer`` metres of a street, rescaled to the original total.
+
+    Args:
+        streets_gdf: Street lines.
+        population: Population raster path, array, or GeoDataFrame.
+        street_buffer: Distance from the streets, in metres.
+        aoi: Optional area to crop to.
+        transform: Affine transform (needed when ``population`` is an array).
+        crs: CRS (needed when ``population`` is an array).
+        min_population: Pixels below this population are dropped.
+        scale: Rescale the kept population to the original total.
+        population_column: Population column when ``population`` is a GeoDataFrame.
+
+    Returns:
+        The filtered population, in the same form as the input.
+    """
     streets_gdf = streets_gdf.to_crs(streets_gdf.estimate_utm_crs())
     streets_gdf.geometry = streets_gdf.geometry.simplify(street_buffer/2).buffer(street_buffer,resolution=4)
     
@@ -128,6 +172,23 @@ def filter_population_by_streets(streets_gdf,population,street_buffer,aoi=None,t
 
 
 def density(population_data:str|gpd.GeoDataFrame|np.ndarray,aoi=None,buffer:float=0, kernel_shape: str = "disk", resolution:float=None, population_column:str=None, min_value:float=0, transform=None, crs=None, return_raster:bool=True):
+    """Population density (people per km2), optionally averaged within ``buffer`` metres of each pixel.
+
+    Args:
+        population_data: Population raster path, array, or GeoDataFrame.
+        aoi: Optional area to crop to.
+        buffer: Averaging radius in metres (0: per pixel).
+        kernel_shape: Shape of the averaging window (``"disk"`` or ``"square"``).
+        resolution: Pixel size in metres when rasterising a GeoDataFrame.
+        population_column: Population column when ``population_data`` is a GeoDataFrame.
+        min_value: Pixels below this population get no density.
+        transform: Affine transform (needed for an array).
+        crs: CRS (needed for an array).
+        return_raster: Return the raster instead of polygons.
+
+    Returns:
+        The density raster, or a GeoDataFrame with a ``pop_density`` column.
+    """
     if isinstance(population_data,np.ndarray):
         if (transform is None) or (crs is None):
             raise Exception("If provinding raster array transform and crs are required")
@@ -194,6 +255,15 @@ def density(population_data:str|gpd.GeoDataFrame|np.ndarray,aoi=None,buffer:floa
 
 def density_matrix_to_processing_order(density_matrix, level_of_services):
     # Melt the DataFrame into long format
+    """Order the (density, distance, level) rules of a density matrix so that better levels are written last and win.
+
+    Args:
+        density_matrix: Table with a ``density`` column and one column per distance, holding the level required.
+        level_of_services: The labels from best to worst.
+
+    Returns:
+        DataFrame with ``density``, ``distance``, ``ls`` in processing order.
+    """
     melted = density_matrix.melt(
         id_vars="density", var_name="distance", value_name="ls"
     ).dropna(subset=["ls"])
@@ -224,6 +294,26 @@ def level_of_service_raster(
         street_buffer:float=50,
         level_of_service_column:str='level_of_service',
     ):
+    """Write the offered, demanded and difference level-of-service rasters (GeoTIFF) to ``save_path``.
+
+    Args:
+        save_path: Output folder.
+        population: Population raster path, array, or GeoDataFrame.
+        offer: Service geometries (lines or polygons) with a level column.
+        density_matrix: Density thresholds per distance and level (see :func:`density_matrix_to_processing_order`).
+        level_of_services: The labels from best to worst.
+        min_population: Pixels below this population are ignored.
+        polygons: Unused here (kept for symmetry with :func:`level_of_service`).
+        aoi: Optional area to crop to.
+        transform: Affine transform (needed for an array).
+        crs: CRS (needed for an array).
+        resolution: Output pixel size in metres.
+        street_buffer: Buffer (m) around line geometries of the offer.
+        level_of_service_column: Level column of ``offer``.
+
+    Returns:
+        None (files ``offer.tif``, ``demand.tif`` and ``difference.tif`` are written).
+    """
     if isinstance(population,str):
         pop_raster, transform, crs = raster_utils.read_raster(population,aoi=aoi,nodata=0)
     elif isinstance(population,np.ndarray):
@@ -385,6 +475,26 @@ def level_of_service(
         street_buffer:float=50,
         level_of_service_column:str='level_of_service',
     ):
+    """Offered and demanded level of service for every populated pixel (or polygon), and their difference.
+
+    Args:
+        population: Population raster path, array, or GeoDataFrame.
+        offer: Service geometries (lines or polygons) with a level column.
+        density_matrix: Density thresholds per distance and level.
+        level_of_services: The labels from best to worst.
+        min_population: Places with this population or less are dropped.
+        polygons: Optional polygons to report on instead of pixels.
+        aoi: Optional area to crop to.
+        transform: Affine transform (needed for an array).
+        crs: CRS (needed for an array).
+        resolution: Pixel size in metres.
+        street_buffer: Buffer (m) around the offer geometries.
+        level_of_service_column: Level column of ``offer``.
+
+    Returns:
+        GeoDataFrame with population, densities per buffer, ``level_of_service_offer``, ``level_of_service_demand`` and
+        ``level_of_service_difference``.
+    """
     if isinstance(population,str):
         pop_raster, transform, crs = raster_utils.read_raster(population,aoi=aoi,nodata=0)
     elif isinstance(population,np.ndarray):

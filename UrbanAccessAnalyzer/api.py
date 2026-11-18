@@ -288,7 +288,14 @@ class StreetNetwork:
 
     @classmethod
     def load(cls, folder: str) -> "StreetNetwork":
-        """Load a network previously written by :meth:`save`."""
+        """Load a network previously written by :meth:`save`.
+
+        Args:
+            folder: Folder written by :meth:`save` (``nodes.parquet``, ``edges.parquet``, ``meta.txt``).
+
+        Returns:
+            The loaded network.
+        """
         nodes = pl.read_parquet(os.path.join(folder, "nodes.parquet"))
         edges = pl.read_parquet(os.path.join(folder, "edges.parquet"))
         with open(os.path.join(folder, "meta.txt")) as f:
@@ -296,7 +303,15 @@ class StreetNetwork:
         return cls(nodes, edges, crs)
 
     def plot(self, m=None, **kwargs):
-        """Draw this network's edges on a Folium map."""
+        """Draw this network's edges on a Folium map.
+
+        Args:
+            m: Existing Folium map to draw on; ``None`` creates one.
+            **kwargs: Passed to :func:`UrbanAccessAnalyzer.plotting.general_map`.
+
+        Returns:
+            The Folium map.
+        """
         from . import plotting
 
         return plotting.general_map(m=m, gdfs=[self.to_gdf().to_crs(4326)], **kwargs)
@@ -348,12 +363,30 @@ class PointsOfInterest:
         return cls(fn(bounds), crs="EPSG:4326")
 
     def assign_score_by_values(self, column: str, value_priority: list, out_column: str = "poi_score") -> "PointsOfInterest":
-        """Assign a ``[0, 1]`` score from a categorical column; see :func:`UrbanAccessAnalyzer.scoring.score_by_values`."""
+        """Assign a ``[0, 1]`` score from a categorical column; see :func:`UrbanAccessAnalyzer.scoring.score_by_values`.
+
+        Args:
+            column: Categorical column to score.
+            value_priority: Values from best to worst; the best gets score 1.
+            out_column: Name of the new score column.
+
+        Returns:
+            A new :class:`PointsOfInterest` with the score column.
+        """
         scores = scoring.score_by_values(self.df[column].to_list(), value_priority)
         return PointsOfInterest(self.df.with_columns(pl.Series(out_column, scores)), crs=self.crs)
 
     def to_h3(self, resolution: int, columns: Optional[list] = None, method: Union[str, dict] = "max") -> pl.DataFrame:
-        """Rasterize these points to H3 cells; see :func:`UrbanAccessAnalyzer.h3_ops.from_df`."""
+        """Rasterize these points to H3 cells; see :func:`UrbanAccessAnalyzer.h3_ops.from_df`.
+
+        Args:
+            resolution: H3 resolution.
+            columns: Columns to carry onto the cells; ``None`` = all.
+            method: How several points in one cell combine (``"max"``, ``"sum"``, ... or ``{column: method}``).
+
+        Returns:
+            One row per H3 cell.
+        """
         return h3_ops.from_df(self.df, resolution=resolution, columns=columns, method=method)
 
     def to_gdf(self) -> gpd.GeoDataFrame:
@@ -408,7 +441,16 @@ class AccessibilityAnalyzer:
         poi_score_col: str = "poi_score",
         score_bins: Optional[int] = None,
     ):
-        """See :func:`UrbanAccessAnalyzer.isochrones.default_distance_matrix`."""
+        """See :func:`UrbanAccessAnalyzer.isochrones.default_distance_matrix`.
+
+        Args:
+            distance_steps: Walking distances (m) of the access levels, from best to worst.
+            poi_score_col: POI score column.
+            score_bins: Number of score bins; ``None`` = one per distinct score.
+
+        Returns:
+            The distance matrix (score bins x access levels).
+        """
         return isochrones.default_distance_matrix(self.points.df, distance_steps, poi_score_col, score_bins=score_bins)
 
     def run(

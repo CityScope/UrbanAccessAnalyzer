@@ -231,6 +231,13 @@ def poi_table(specs: Sequence[dict], pois: dict[str, gpd.GeoDataFrame]) -> gpd.G
     ``icon`` is the config's optional ``"icon"`` emoji (default ``"📍"``), which
     :func:`UrbanAccessAnalyzer.plotting.general_map` draws on each POI
     (``poi_column="type", poi_icon_column="icon"``).
+
+    Args:
+        specs: The POI configs (each with ``name`` and optional ``icon``).
+        pois: ``{config name: POI GeoDataFrame}``.
+
+    Returns:
+        One GeoDataFrame in EPSG:4326 with ``type``, ``name``, ``icon`` and geometry.
     """
     parts = []
     for s in specs:

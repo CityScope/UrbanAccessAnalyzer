@@ -40,8 +40,8 @@ import pandas as pd
 import polars as pl
 import pyogrio
 import shapely
-from pyproj import Geod
 from shapely.geometry import box
+from geohierarchy.utils import area, geodesic_area, is_utm_reasonable  # noqa: F401  (one implementation, in geohierarchy)
 
 ContainMode = Literal["center", "full", "overlap", "bbox_overlap", "centroid", "center_overlap"]
 
@@ -137,73 +137,10 @@ def read_geofile(path, bounds=None) -> gpd.GeoDataFrame:
     raise FileNotFoundError(f"No valid geofile found for base path: {path}")
 
 
-def geodesic_area(geom, geod: Geod = Geod(ellps="WGS84")) -> float:
-    """Compute ellipsoidal (geodesic) area of a Polygon/MultiPolygon in EPSG:4326.
-
-    Args:
-        geom: Shapely Polygon or MultiPolygon in lon/lat coordinates.
-        geod: ``pyproj.Geod`` defining the ellipsoid.
-
-    Returns:
-        Area in square meters. ``0.0`` for empty/non-polygonal geometry.
-    """
-    if geom is None or geom.is_empty:
-        return 0.0
-    if geom.geom_type == "Polygon":
-        area, _ = geod.geometry_area_perimeter(geom)
-        return abs(area)
-    if geom.geom_type == "MultiPolygon":
-        return sum(abs(geod.geometry_area_perimeter(p)[0]) for p in geom.geoms)
-    return 0.0
 
 
-def is_utm_reasonable(gdf: gpd.GeoDataFrame, max_width_m: float = 750_000, max_height_m: float = 2_000_000, ellps=None) -> bool:
-    """Check whether a GeoDataFrame's extent is small enough for one UTM zone to stay accurate.
-
-    Args:
-        gdf: GeoDataFrame in a geographic CRS.
-        max_width_m: Maximum east-west extent (meters) considered reasonable.
-        max_height_m: Maximum north-south extent (meters) considered reasonable.
-        ellps: Ellipsoid name for the geodesic distance calculation; defaults
-            to the CRS's own ellipsoid.
-
-    Returns:
-        ``True`` if the extent fits within the given thresholds.
-
-    Raises:
-        ValueError: If ``gdf`` is not in a geographic CRS.
-    """
-    if gdf.crs is None or not gdf.crs.is_geographic:
-        raise ValueError("GeoDataFrame must have geographic CRS (degrees).")
-    minx, miny, maxx, maxy = gdf.total_bounds
-    if ellps is None:
-        ellps = gdf.crs.ellipsoid.name.replace(" ", "")
-    geod = Geod(ellps=ellps)
-    midy = (miny + maxy) / 2
-    _, _, width_m = geod.inv(minx, midy, maxx, midy)
-    _, _, height_m = geod.inv(minx, miny, minx, maxy)
-    return width_m <= max_width_m and height_m <= max_height_m
 
 
-def area(gdf: gpd.GeoDataFrame, max_width_m: float = 750_000, max_height_m: float = 2_000_000, ellps=None, geod: Geod = Geod(ellps="WGS84")):
-    """Compute per-feature area, using UTM when reasonable and geodesic area otherwise.
-
-    Args:
-        gdf: GeoDataFrame (any CRS).
-        max_width_m: See :func:`is_utm_reasonable`.
-        max_height_m: See :func:`is_utm_reasonable`.
-        ellps: Ellipsoid override for :func:`is_utm_reasonable`.
-        geod: ``pyproj.Geod`` used for the geodesic fallback.
-
-    Returns:
-        A pandas Series of areas in square meters.
-    """
-    if gdf.crs.is_projected:
-        return gdf.geometry.area
-    gdf = gdf.to_crs(4326)
-    if is_utm_reasonable(gdf, max_width_m, max_height_m, ellps):
-        return gdf.geometry.to_crs(gdf.estimate_utm_crs()).area
-    return gdf.geometry.map(lambda geom: geodesic_area(geom, geod=geod))
 
 
 def intersects_all_with_all(G: Union[gpd.GeoDataFrame, gpd.GeoSeries], g: Union[gpd.GeoDataFrame, gpd.GeoSeries]) -> np.ndarray:

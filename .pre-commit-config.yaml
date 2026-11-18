@@ -4,3 +4,11 @@ repos:
     hooks:
       - id: ruff
       - id: ruff-format
+  - repo: local
+    hooks:
+      - id: check-large-files
+        name: check large files (over 10 MB refused once, over 50 MB never)
+        entry: python3 tools/check_large_files.py
+        language: system
+        pass_filenames: false
+        always_run: true

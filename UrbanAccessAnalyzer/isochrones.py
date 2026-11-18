@@ -553,7 +553,7 @@ def _numeric_access_scores(process_order: pl.DataFrame) -> bool:
     return process_order.schema["access_score"].is_numeric()
 
 
-def exact_edge_access(
+def exact_edge_access_reference(
     edges: pl.DataFrame,
     process_order: pl.DataFrame,
     tier_tables: dict[float, pl.DataFrame],
@@ -733,6 +733,240 @@ def exact_edge_access(
     if untouched_frame is not None:
         result = pl.concat([result, untouched_frame], how="vertical")
     return result
+
+
+
+
+def exact_edge_access(
+    edges: pl.DataFrame,
+    process_order: pl.DataFrame,
+    tier_tables: dict[float, pl.DataFrame],
+    min_edge_length: float = 0.0,
+    unreached_access_score: Optional[float] = 0.0,
+) -> pl.DataFrame:
+    """Split edges at exact tier boundaries and assign an access_score to each piece.
+
+    For each tier from best to worst, the portion of every edge within that
+    tier's remaining distance of either endpoint (and not already claimed by
+    a better tier) is cut out with ``shapely.ops.substring`` and labeled with
+    that tier's ``access_score``. This reproduces sub-edge isochrone boundary
+    precision without node-level snapping artifacts.
+
+    Args:
+        edges: Directed edge table (``u, v, length_m, geometry_wkb``, plus
+            any extra columns, which are copied onto every output piece).
+        process_order: Output of :func:`distance_matrix_to_processing_order`
+            (used for tier ranking, best first).
+        tier_tables: Per-tier ``node_id, remaining_dist`` tables from
+            :func:`compute_node_access`.
+        min_edge_length: Minimum sub-segment length to keep; shorter
+            fragments are dropped (their access_score effectively inherited
+            by the adjacent kept piece).
+        unreached_access_score: Access score given to the parts of the
+            network no tier reaches -- both whole edges outside every
+            isochrone and the un-covered middle of a partially-covered edge.
+            Defaults to ``0.0``: on a "higher is better" access score, ``0``
+            is a real, meaningful value ("this street exists, and has no
+            useful access"), whereas *omitting* the edge entirely (the
+            pre-2026-08-13 behaviour) silently shrank the analysed network
+            down to a halo around the POIs and made every downstream
+            consumer see a network cropped to POI range rather than to the
+            AOI. Pass ``None`` to restore that old drop-the-edge behaviour.
+            Ignored (treated as ``None``) when ``access_score`` is
+            categorical rather than numeric -- see
+            :func:`_numeric_access_scores`.
+
+    Returns:
+        Polars DataFrame with the same columns as ``edges`` plus
+        ``access_score (f64)``, one row per kept sub-segment. With
+        ``unreached_access_score`` set (the default) every input edge is
+        represented, in full, by one or more output pieces; with it set to
+        ``None``, edges no tier reaches are dropped.
+
+    Performance note:
+        Per-tier, per-edge remaining-distance lookups (``rem_u``/``rem_v``)
+        are vectorized with NumPy (``np.searchsorted`` against a sorted
+        array of node ids, instead of a Python-level ``dict.get`` loop over
+        every edge for every tier). The final per-edge segment cut still
+        loops in Python because ``shapely.ops.substring`` has no vectorized
+        (array-in, array-out) form, but that loop is restricted to only the
+        edges with nonzero available length in the current tier (via
+        ``np.nonzero``) instead of iterating over every edge on every tier
+        regardless of whether it has anything left to cut.
+    """
+    tiers = (
+        process_order.select("access_score", "rank").unique().sort("rank")["access_score"].to_list()
+    )
+    extra_cols = [c for c in edges.columns if c not in ("u", "v", "length_m", "geometry_wkb")]
+
+    n = edges.height
+    length = edges["length_m"].to_numpy().astype(float)
+    dist_u = np.zeros(n)
+    dist_v = np.zeros(n)
+    lines = shapely.from_wkb(edges["geometry_wkb"].to_numpy())
+    u_ids = edges["u"].to_numpy().astype(np.int64)
+    v_ids = edges["v"].to_numpy().astype(np.int64)
+    cutter = _LineCutter(lines)
+
+    all_node_ids = np.unique(np.concatenate([u_ids, v_ids])) if n else np.array([], dtype=np.int64)
+    u_pos = np.searchsorted(all_node_ids, u_ids)
+    v_pos = np.searchsorted(all_node_ids, v_ids)
+
+    out_schema = {
+        **{c: edges.schema[c] for c in ["u", "v", "length_m", "geometry_wkb"]},
+        **{c: edges.schema[c] for c in extra_cols},
+        "access_score": process_order.schema["access_score"],
+    }
+    extra = edges.select(extra_cols) if extra_cols else None
+    pieces: list[pl.DataFrame] = []
+
+    def emit(edge_idx, side, start, end, score, u_val, v_val):
+        """One frame for the cut pieces (row order = given order); the geometry of every piece is cut in one vectorized call."""
+        geoms = cutter.cut(edge_idx, start, end)
+        cols = {
+            "u": pl.Series("u", u_val, dtype=out_schema["u"]), "v": pl.Series("v", v_val, dtype=out_schema["v"]),
+            "length_m": pl.Series("length_m", (end - start).astype(float), dtype=out_schema["length_m"]),
+            "geometry_wkb": pl.Series("geometry_wkb", shapely.to_wkb(geoms), dtype=out_schema["geometry_wkb"]),
+        }
+        frame = pl.DataFrame(cols)
+        if extra is not None:
+            frame = pl.concat([frame, extra[edge_idx]], how="horizontal")
+        return frame.with_columns(pl.lit(score).cast(out_schema["access_score"]).alias("access_score")).select(list(out_schema))
+
+    for tier in tiers:
+        table = tier_tables.get(tier)
+        if table is None:
+            continue
+        table_node_ids = table["node_id"].to_numpy().astype(np.int64)
+        table_rem = table["remaining_dist"].to_numpy().astype(float)
+        pos = np.searchsorted(all_node_ids, table_node_ids)
+        valid = (pos < len(all_node_ids)) & (all_node_ids[pos] == table_node_ids)
+        rem_dense = np.zeros(len(all_node_ids))
+        rem_dense[pos[valid]] = table_rem[valid]
+
+        rem_u = rem_dense[u_pos]
+        rem_v = rem_dense[v_pos]
+
+        avail_u = np.clip(rem_u - dist_u, 0, None)
+        avail_v = np.clip(rem_v - dist_v, 0, None)
+        remaining_len = np.clip(length - dist_u - dist_v, 0, None)
+        avail_u = np.minimum(avail_u, remaining_len)
+        avail_v = np.minimum(avail_v, np.clip(remaining_len - avail_u, 0, None))
+
+        # pieces in the original order: for each touched edge its u-side piece, then its v-side piece
+        has_u = avail_u > min_edge_length
+        has_v = avail_v > min_edge_length
+        iu, iv = np.nonzero(has_u)[0], np.nonzero(has_v)[0]
+        if len(iu) or len(iv):
+            edge_idx = np.concatenate([iu, iv])
+            side = np.concatenate([np.zeros(len(iu), np.int8), np.ones(len(iv), np.int8)])
+            order = np.argsort(edge_idx * 2 + side, kind="stable")
+            edge_idx, side = edge_idx[order], side[order]
+            is_u = side == 0
+            start = np.where(is_u, dist_u[edge_idx], length[edge_idx] - dist_v[edge_idx] - avail_v[edge_idx])
+            end = np.where(is_u, dist_u[edge_idx] + avail_u[edge_idx], length[edge_idx] - dist_v[edge_idx])
+            pieces.append(emit(edge_idx, side, start, end, tier, np.where(is_u, u_ids[edge_idx], 0), np.where(is_u, 0, v_ids[edge_idx])).with_columns(
+                pl.when(pl.Series(~is_u)).then(pl.col("v")).otherwise(None).cast(out_schema["v"]).alias("v"),
+                pl.when(pl.Series(is_u)).then(pl.col("u")).otherwise(None).cast(out_schema["u"]).alias("u"),
+            ).select(list(out_schema)))
+
+        dist_u = np.clip(dist_u + avail_u, 0, length)
+        dist_v = np.clip(dist_v + avail_v, 0, length)
+
+    fill_unreached = unreached_access_score is not None and _numeric_access_scores(process_order) and bool(n)
+    untouched_frame = None
+    if fill_unreached:
+        leftover = np.clip(length - dist_u - dist_v, 0, None)
+        untouched = (dist_u <= 0) & (dist_v <= 0) & (leftover > min_edge_length)
+        partial = (~untouched) & (leftover > min_edge_length)
+        if untouched.any():
+            untouched_frame = edges.filter(pl.Series(untouched)).with_columns(
+                pl.lit(unreached_access_score).alias("access_score")
+            )
+        ip = np.nonzero(partial)[0]
+        if len(ip):
+            frame = emit(ip, None, dist_u[ip], length[ip] - dist_v[ip], unreached_access_score, np.where(dist_u[ip] <= 0, u_ids[ip], 0), np.where(dist_v[ip] <= 0, v_ids[ip], 0))
+            frame = frame.with_columns(
+                pl.when(pl.Series(dist_u[ip] <= 0)).then(pl.col("u")).otherwise(None).cast(out_schema["u"]).alias("u"),
+                pl.when(pl.Series(dist_v[ip] <= 0)).then(pl.col("v")).otherwise(None).cast(out_schema["v"]).alias("v"),
+            ).select(list(out_schema))
+            pieces.append(frame)
+
+    if untouched_frame is not None:
+        untouched_frame = untouched_frame.select(list(out_schema)).cast(out_schema)  # type: ignore[arg-type]
+    if not pieces:
+        return untouched_frame if untouched_frame is not None else pl.DataFrame(schema=out_schema)
+    result = pl.concat(pieces, how="vertical")
+    if untouched_frame is not None:
+        result = pl.concat([result, untouched_frame], how="vertical")
+    return result
+
+
+class _LineCutter:
+    """`shapely.ops.substring` for many (line, start, end) triples at once: the vertices strictly between the two distances plus the two interpolated end points."""
+
+    def __init__(self, lines):
+        self.lines = lines
+        n = len(lines)
+        coords, idx = shapely.get_coordinates(lines, return_index=True)
+        self.coords = coords
+        same = np.r_[False, idx[1:] == idx[:-1]]
+        step = np.zeros(len(coords))
+        step[1:] = np.hypot(*(coords[1:] - coords[:-1]).T)
+        step[~same] = 0.0
+        cum = np.cumsum(step)
+        first = np.r_[0, np.flatnonzero(~same[1:]) + 1] if len(coords) else np.array([], dtype=np.int64)
+        base = np.zeros(len(coords))
+        if len(first):
+            base = np.repeat(cum[first], np.diff(np.r_[first, len(coords)]))
+        self.D = cum - base                      # distance of every vertex from the start of its own line
+        self.line_of = idx
+        self.first = np.full(n, -1, dtype=np.int64)
+        self.first[idx[first]] = first
+        self.count = np.bincount(idx, minlength=n)
+        self.total = np.zeros(n)
+        last = self.first + self.count - 1
+        ok = self.first >= 0
+        self.total[ok] = self.D[last[ok]]
+        big = float(self.total.max() + 1.0) * 4 if n else 1.0
+        self.big = big
+        self.key = idx.astype(float) * big + self.D   # sorted globally: lines are in order and D increases along each line
+
+    def _point(self, e, d):
+        """Interpolated point at distance d on line e, and the index of the last vertex at or before it."""
+        j = np.searchsorted(self.key, e * self.big + d, side="right") - 1
+        j = np.clip(j, self.first[e], self.first[e] + self.count[e] - 2)
+        seg = np.maximum(self.D[j + 1] - self.D[j], 1e-300)
+        t = np.clip((d - self.D[j]) / seg, 0.0, 1.0)[:, None]
+        return self.coords[j] + (self.coords[j + 1] - self.coords[j]) * t
+
+    def cut(self, edge_idx, start, end):
+        e = np.asarray(edge_idx, dtype=np.int64)
+        a = np.clip(np.asarray(start, float), 0.0, self.total[e])
+        b = np.clip(np.asarray(end, float), 0.0, self.total[e])
+        degenerate = (b <= a) | (self.count[e] < 2)
+        lo = np.searchsorted(self.key, e * self.big + a, side="right")   # first vertex strictly after `a`
+        hi = np.searchsorted(self.key, e * self.big + b, side="left")    # first vertex at or after `b`
+        interior = np.maximum(hi - lo, 0)
+        interior[degenerate] = 0
+        sizes = interior + 2
+        pa, pb = self._point(e, a), self._point(e, b)
+        m = len(e)
+        starts = np.r_[0, np.cumsum(sizes)[:-1]]
+        flat = np.empty((int(sizes.sum()), 2))
+        flat[starts] = pa
+        flat[starts + sizes - 1] = pb
+        tot_int = int(interior.sum())
+        if tot_int:
+            owner = np.repeat(np.arange(m), interior)
+            within = np.arange(tot_int) - np.repeat(np.cumsum(interior) - interior, interior)
+            flat[starts[owner] + 1 + within] = self.coords[lo[owner] + within]
+        geoms = shapely.linestrings(flat, indices=np.repeat(np.arange(m), sizes))
+        if degenerate.any():   # a zero-length piece is a point in shapely.ops.substring: keep that exact behaviour for those rare rows
+            geoms = np.asarray(geoms, dtype=object)
+            for k in np.flatnonzero(degenerate):
+                geoms[k] = shapely.ops.substring(self.lines[e[k]], float(start[k]) if np.ndim(start) else float(start), float(end[k]) if np.ndim(end) else float(end))
+        return geoms
 
 
 def _densify_node_access(

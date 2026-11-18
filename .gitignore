@@ -107,3 +107,25 @@ api_keys.json
 !tests/**
 __pycache__/
 __pycache__/
+
+# compiled Python, also inside the whitelisted folders above (tests/**)
+**/__pycache__/
+*.pyc
+
+# ===== Local only: never in the public repository =====
+# API keys and credentials
+api_keys.json
+*.env
+.env
+*.key
+*.pem
+# notes about this machine and its processes (hosting, uploads, runs, local paths): keep them as *.local.md or under local/
+*.local.md
+/local/
+# hosting / upload scripts (the maps' hosting lives outside the repositories)
+/hosting/
+**/deploy_*.py
+**/dep_*.py
+# coding-agent session files
+.claude/
+CLAUDE.local.md
