@@ -33,7 +33,7 @@ examples/output/
 *.osm.pbf
 !tests/fixtures/*.osm.pbf
 
-api_keys.py
+api_keys.json
 api_keys.json
 
 presentation/

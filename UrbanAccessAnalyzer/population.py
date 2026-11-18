@@ -12,7 +12,7 @@ population-density "demand" layer to produce a per-pixel
 WorldPop raster download and country/subdivision resolution
 (previously ``download_worldpop_population`` and ``get_country_region``
 in this module) have moved to
-:mod:`pycensus.countries.worldwide.worldpop` -- install the ``census`` extra
+:mod:`pycensus.census.worldwide.worldpop` -- install the ``census`` extra
 (``pip install urbanaccessanalyzer[census]``) to use them. They are
 re-exported (lazily) from this module for backwards compatibility.
 """
@@ -28,7 +28,7 @@ import rasterio
 from . import raster_ops as raster_utils
 
 try:
-    from pycensus.countries.worldwide.worldpop import download_worldpop_population, get_country_region
+    from pycensus.census.worldwide.worldpop import download_worldpop_population, get_country_region
 except ImportError:
 
     def download_worldpop_population(*args, **kwargs):
