@@ -1,5 +1,7 @@
 site_name: UrbanAccessAnalyzer
 site_description: Street networks and access to points of interest
+site_url: https://cityscope.github.io/UrbanAccessAnalyzer/
+repo_url: https://github.com/CityScope/UrbanAccessAnalyzer
 docs_dir: docs
 theme:
   name: material
