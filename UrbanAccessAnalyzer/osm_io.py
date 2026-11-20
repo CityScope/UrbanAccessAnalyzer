@@ -370,17 +370,15 @@ def load_pbf(
             callers rely on.
 
     Returns:
-        A tuple ``(nodes, edges)``:
-
-        - ``nodes``: columns ``node_id (i64), lon (f64), lat (f64)``, one row
-          per node referenced by a kept edge.
-        - ``edges``: columns ``u (i64), v (i64), length_m (f64),
-          highway (str), oneway (bool), geometry_wkb (binary), edge_uid
-          (i64)``, one directed row per traversable direction (two rows per
-          two-way segment sharing the same ``edge_uid``, one row for a
-          ``oneway=yes`` segment). ``edge_uid`` lets downstream code (e.g.
-          ``graph_ops.simplify``) recognize the forward/backward rows of the
-          same original way segment as one edge.
+        nodes: columns ``node_id (i64), lon (f64), lat (f64)``, one row
+            per node referenced by a kept edge.
+        edges: columns ``u (i64), v (i64), length_m (f64),
+            highway (str), oneway (bool), geometry_wkb (binary), edge_uid
+            (i64)``, one directed row per traversable direction (two rows per
+            two-way segment sharing the same ``edge_uid``, one row for a
+            ``oneway=yes`` segment). ``edge_uid`` lets downstream code (e.g.
+            ``graph_ops.simplify``) recognize the forward/backward rows of the
+            same original way segment as one edge.
 
     Raises:
         ValueError: If ``network_type`` is not a known profile.

@@ -130,13 +130,11 @@ def default_distance_matrix(
             re-ranked to contiguous small integers.
 
     Returns:
-        Tuple ``(distance_matrix, access_score_values)``:
-
-        - ``distance_matrix``: one row per distinct poi_score (excluding 0),
-          one column per distance step plus a ``poi_score`` column, values
-          are access scores in ``[0, 1]``.
-        - ``access_score_values``: sorted distinct access score values found
-          in the matrix, best first.
+        distance_matrix: one row per distinct poi_score (excluding 0),
+            one column per distance step plus a ``poi_score`` column, values
+            are access scores in ``[0, 1]``.
+        access_score_values: sorted distinct access score values found
+            in the matrix, best first.
     """
     poi_scores = poi[poi_score_col].drop_nulls().unique().to_numpy()
     poi_scores = np.unique(np.append(poi_scores, 0.0))
@@ -286,23 +284,21 @@ def compute_node_access(
         optimization with no effect on results.
 
     Returns:
-        Tuple ``(node_access, tier_tables)``:
-
-        - ``node_access``: columns ``node_id, access_score, rank,
-          remaining_dist`` — one row per node with the best (lowest rank)
-          access score it can reach and how much distance budget is left at
-          that tier's radius. ``access_score`` is a "higher is better" score,
-          so a node with no row here has no computed access at all; if you
-          left-join this against a full node table for a dense result, fill
-          those nulls with ``0`` (the worst score), not left as null --
-          mirroring :func:`UrbanAccessAnalyzer.scoring.score_by_values`'s
-          convention. ``remaining_dist``, by contrast, is a "lower is
-          better"-style distance quantity and should stay ``null`` for
-          unreached nodes rather than being filled with anything.
-        - ``tier_tables``: dict mapping each distinct ``access_score`` value
-          to a ``node_id, remaining_dist`` DataFrame, needed by
-          :func:`exact_edge_access` to reproduce the same per-tier reach when
-          splitting edges.
+        node_access: columns ``node_id, access_score, rank,
+            remaining_dist`` — one row per node with the best (lowest rank)
+            access score it can reach and how much distance budget is left at
+            that tier's radius. ``access_score`` is a "higher is better" score,
+            so a node with no row here has no computed access at all; if you
+            left-join this against a full node table for a dense result, fill
+            those nulls with ``0`` (the worst score), not left as null --
+            mirroring :func:`UrbanAccessAnalyzer.scoring.score_by_values`'s
+            convention. ``remaining_dist``, by contrast, is a "lower is
+            better"-style distance quantity and should stay ``null`` for
+            unreached nodes rather than being filled with anything.
+        tier_tables: dict mapping each distinct ``access_score`` value
+            to a ``node_id, remaining_dist`` DataFrame, needed by
+            :func:`exact_edge_access` to reproduce the same per-tier reach when
+            splitting edges.
     """
     if poi_score_col is None:
         points = points.with_columns(pl.lit(1.0).alias("__poi_score"))

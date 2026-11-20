@@ -51,14 +51,12 @@ def build_csr(edges: pl.DataFrame, nodes: pl.DataFrame) -> tuple[csr_matrix, dic
             positions are stable across repeated calls with the same graph.
 
     Returns:
-        A tuple ``(csgraph, node_id_to_index, index_to_node_id)``:
-
-        - ``csgraph``: ``scipy.sparse.csr_matrix`` of shape
-          ``(n_nodes, n_nodes)`` with edge weights.
-        - ``node_id_to_index``: dict mapping OSM/graph ``node_id`` to matrix
-          row/column index.
-        - ``index_to_node_id``: numpy array such that
-          ``index_to_node_id[i]`` is the ``node_id`` at matrix index ``i``.
+        csgraph: ``scipy.sparse.csr_matrix`` of shape
+            ``(n_nodes, n_nodes)`` with edge weights.
+        node_id_to_index: dict mapping OSM/graph ``node_id`` to matrix
+            row/column index.
+        index_to_node_id: numpy array such that
+            ``index_to_node_id[i]`` is the ``node_id`` at matrix index ``i``.
     """
     node_ids = nodes["node_id"].to_numpy()
     index_to_node_id = node_ids

@@ -9,6 +9,8 @@ permissions:
   contents: read
   pages: write
   id-token: write
+env:
+  NO_MKDOCS_2_WARNING: "1"   # keeps the Material end-of-life notice out of the build log
 concurrency:
   group: pages
   cancel-in-progress: true
@@ -16,13 +18,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: pip install "mkdocs-material>=9.5" "mkdocstrings[python]>=0.27" .
+      - run: pip install "mkdocs-material>=9.5,<10" "mkdocstrings[python]>=1.0,<2" .
       - run: mkdocs build --strict --site-dir site
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
   deploy:
@@ -33,4 +35,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

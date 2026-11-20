@@ -18,6 +18,8 @@ plugins:
           paths: [.]
           options:
             docstring_style: google
+            docstring_options:
+              warn_missing_types: false   # parameters are described in words; a type annotation is not required
             show_source: false
             show_root_heading: false
             members_order: source
