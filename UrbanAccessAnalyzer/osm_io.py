@@ -396,7 +396,7 @@ def load_pbf(
             f" AND lon BETWEEN {minx - bbox_margin_deg} AND {maxx + bbox_margin_deg}"
         )
 
-    nodes_all = con.execute(
+    nodes_all = con.sql(   # sql(): in duckdb 2 execute() no longer gives a result with .pl()
         f"SELECT id AS node_id, lat, lon FROM ST_ReadOSM('{pbf_path}') WHERE kind = 'node'{where_bbox}"
     ).pl()
 
@@ -426,7 +426,7 @@ def load_pbf(
     # only the four tag values actually used (`highway`/`foot`/`bicycle`/`oneway`) instead
     # of materializing the full tags map for every kept way.
     con.register("_nodes_bbox", nodes_all)
-    ways = con.execute(
+    ways = con.sql(
         """
         SELECT
             id AS way_id,
@@ -444,7 +444,7 @@ def load_pbf(
               WHERE ref.node_id IN (SELECT node_id FROM _nodes_bbox)
           )
         """,
-        [pbf_path],
+        params=[pbf_path],
     ).pl()
     con.close()
 
